@@ -1,0 +1,8 @@
+[
+ {"Type":"ClassBoundaries","Method":"Exercise","Arguments":[1]},
+ {"Type":"ClassBoundaries","Method":"Exercise","Arguments":[-5]},
+ {"Type":"ClassBoundaries","Method":"Identity","Arguments":[]},
+ {"Type":"ClassBoundaries","Method":"Defaults","Arguments":[]},
+ {"Type":"ClassBoundaries","Method":"NullField","Arguments":[]},
+ {"Type":"ClassBoundaries","Method":"NullMethod","Arguments":[]}
+]

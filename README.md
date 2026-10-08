@@ -59,6 +59,8 @@ the license. Supplemental fixtures cover boundary behavior.
 | `switch` statements/expressions | PowerShell matching ignores case and enumerates inputs | Evaluate once, ordinal constant tests, first matching arm |
 | `continue` inside a switch | PowerShell can continue the switch | Label the actual enclosing C# loop |
 | Null strings | A typed PowerShell string becomes empty | Preserve null in object storage |
+| Simple class fields and methods | Case-insensitive members and function dispatch differ | Symbol-named fields, constructor factories and explicit receiver functions |
+| Class assignment | Objects must retain shared identity | Preserve the same object reference; null receivers throw |
 
 ## Supported now
 
