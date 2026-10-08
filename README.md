@@ -1,10 +1,10 @@
-# cs2ps
+# CS2PS
 
 Translates C# into typed, idiomatic PowerShell, mechanically, keeping C#'s
 meaning. It parses with Roslyn from the running PowerShell's own `$PSHOME`
 and uses Roslyn's semantic model to make every meaning difference explicit:
 
-| C# | PowerShell that would differ | What cs2ps emits |
+| C# | PowerShell that would differ | What CS2PS emits |
 |---|---|---|
 | `a / b` on integers truncates | `$a / $b` returns a double | `[Math]::DivRem($a, $b).Item1` |
 | `(int)x` on a double truncates | `[int]$x` rounds half to even | `[int][Math]::Truncate($x)` |
@@ -17,9 +17,9 @@ Static methods become advanced functions with typed parameters and
 the supported subset is reported as a diagnostic with its line and marked in
 the output; nothing is guessed.
 
-cs2ps is a development tool. Its output enters other repositories only as
+CS2PS is a development tool. Its output enters other repositories only as
 reviewed PowerShell that names its source and revision, and nothing in a
-build depends on cs2ps or Roslyn.
+build depends on CS2PS or Roslyn.
 
 ## Use
 

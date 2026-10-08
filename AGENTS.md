@@ -1,4 +1,4 @@
-# cs2ps repository contract
+# CS2PS repository contract
 
 - Purpose: translate C# into typed, idiomatic PowerShell that keeps C#'s
   meaning. The output is reviewed PowerShell; it is an input to other
