@@ -1,0 +1,15 @@
+[
+ {"Type":"BitBoundaries","Method":"Mix","Arguments":[-1,7]},
+ {"Type":"BitBoundaries","Method":"Mix","Arguments":[2147483647,-2147483648]},
+ {"Type":"BitBoundaries","Method":"Left","Arguments":[1,32]},
+ {"Type":"BitBoundaries","Method":"Left","Arguments":[1,-1]},
+ {"Type":"BitBoundaries","Method":"Left","Arguments":[2147483647,1]},
+ {"Type":"BitBoundaries","Method":"Right","Arguments":[-8,2]},
+ {"Type":"BitBoundaries","Method":"Logical","Arguments":[-1,1]},
+ {"Type":"BitBoundaries","Method":"Logical","Arguments":[-1,32]},
+ {"Type":"BitBoundaries","Method":"Unsigned","Arguments":[0,1]},
+ {"Type":"BitBoundaries","Method":"LongLogical","Arguments":[-1,1]},
+ {"Type":"BitBoundaries","Method":"LongLogical","Arguments":[-1,64]},
+ {"Type":"BitBoundaries","Method":"Assign","Arguments":[-9]},
+ {"Type":"BitBoundaries","Method":"Eager","Arguments":[]}
+]

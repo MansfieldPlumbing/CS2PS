@@ -101,9 +101,29 @@ function Invoke-CS2PSInteger($left, $right, [string] $operator, [string] $type, 
             if ((($type -eq 'int' -and $l -eq [int]::MinValue) -or ($type -eq 'long' -and $l -eq [long]::MinValue)) -and $r -eq -1) { throw [OverflowException]::new() }
             [Numerics.BigInteger]::Remainder($l, $r)
         }
+        '&' { [Numerics.BigInteger]::op_BitwiseAnd($l, $r) }
+        '|' { [Numerics.BigInteger]::op_BitwiseOr($l, $r) }
+        '^' { [Numerics.BigInteger]::op_ExclusiveOr($l, $r) }
+        '~' { [Numerics.BigInteger]::op_OnesComplement($l) }
+        '<<' {
+            $mask = if ($type -in 'long','ulong') { 63 } else { 31 }
+            [Numerics.BigInteger]::op_LeftShift($l, ([int]$right -band $mask))
+        }
+        '>>' {
+            $mask = if ($type -in 'long','ulong') { 63 } else { 31 }
+            [Numerics.BigInteger]::op_RightShift($l, ([int]$right -band $mask))
+        }
+        '>>>' {
+            $bits = if ($type -in 'long','ulong') { 64 } else { 32 }
+            if ($l.Sign -lt 0) { $l += [Numerics.BigInteger]::Pow(2, $bits) }
+            [Numerics.BigInteger]::op_RightShift($l, ([int]$right -band ($bits - 1)))
+        }
         default { throw [NotSupportedException]::new('Integer operator') }
     }
     Convert-CS2PSInteger $value $type $checked
+}
+function Invoke-CS2PSBoolean([bool] $left, [bool] $right, [string] $operator) {
+    switch ($operator) { '&' { return $left -and $right } '|' { return $left -or $right } '^' { return $left -ne $right } }
 }
 function Convert-CS2PSFloatingInteger($value, [string] $type, [bool] $checked) {
     if ($value -is [decimal]) { return Convert-CS2PSInteger ([Numerics.BigInteger]$value) $type $true }
@@ -479,6 +499,7 @@ function Convert-Expression($e) {
             $op = $e.OperatorToken.Text
             $x = Convert-Expression $e.Operand
             if ($op -in '++','--') { return Convert-Increment $e $false }
+            if ($op -eq '~' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($x) 0 '~' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
             if ($op -eq '-' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger 0 ($x) '-' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))" }
             switch ($op) { '!' { return "-not ($x)" } '-' { return "-($x)" } '+' { return "($x)" } default { Add-Diagnostic $e "prefix $op"; return '$null' } }
         }
@@ -588,6 +609,8 @@ function Convert-Binary($e) {
     $lt = Get-ExprType $e.Left; $rt = Get-ExprType $e.Right
     $op = $e.OperatorToken.Text
     $strings = (Test-String $lt) -or (Test-String $rt)
+    if ($op -in '&','|','^' -and (Get-ExprType $e).SpecialType.ToString() -eq 'System_Boolean') { return "(Invoke-CS2PSBoolean ($l) ($r) '$op')" }
+    if ($op -in '&','|','^','<<','>>','>>>' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
     if ($op -in '+','-','*','/','%' -and (Test-Integral (Get-ExprType $e))) {
         return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))"
     }
