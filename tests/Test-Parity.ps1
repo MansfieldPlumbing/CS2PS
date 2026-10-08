@@ -1,7 +1,8 @@
 #requires -Version 7.4
 [CmdletBinding()]
-param([string] $Fixture)
+param([string] $Fixture, [string] $Culture = 'en-US')
 $ErrorActionPreference = 'Stop'
+[Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($Culture)
 $root = Split-Path $PSScriptRoot
 . (Join-Path $root 'src/ConvertFrom-CSharp.ps1')
 Initialize-Roslyn

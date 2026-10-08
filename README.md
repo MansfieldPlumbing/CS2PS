@@ -63,6 +63,7 @@ the license. Supplemental fixtures cover boundary behavior.
 | Class assignment | Objects must retain shared identity | Preserve the same object reference; null receivers throw |
 | Simple struct assignment, parameters and returns | PowerShell classes have reference semantics | Explicit copies at value boundaries; nested value fields copy, reference fields remain shared |
 | `out`/`ref` locals and parameters | Ordinary function arguments copy their values | `[ref]` cells and `.Value` accesses; aliases and forwarding retain the same storage |
+| String interpolation and composite formatting | Expansion and formatting rules differ | .NET composite format strings, ordered values, alignment, format specifiers and current culture |
 
 ## Supported now
 

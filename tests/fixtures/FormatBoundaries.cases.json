@@ -1,0 +1,8 @@
+[
+ {"Type":"FormatBoundaries","Method":"Show","Arguments":["text",1234.5]},
+ {"Type":"FormatBoundaries","Method":"Show","Arguments":[null,-12.25]},
+ {"Type":"FormatBoundaries","Method":"Composite","Arguments":[1234.5]},
+ {"Type":"FormatBoundaries","Method":"Escape","Arguments":["a'b"]},
+ {"Type":"FormatBoundaries","Method":"Order","Arguments":[]},
+ {"Type":"FormatBoundaries","Method":"Empty","Arguments":[]}
+]

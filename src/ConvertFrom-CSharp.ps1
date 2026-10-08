@@ -377,6 +377,21 @@ function Convert-Expression($e) {
             if ($v -is [char]) { return "[char]'$v'" }
             return $e.Token.Text -replace '[fFdDmM]$', ''
         }
+        'InterpolatedStringExpressionSyntax' {
+            $format = [Text.StringBuilder]::new(); $values = [System.Collections.Generic.List[string]]::new()
+            foreach ($part in $e.Contents) {
+                if ($part -is [Microsoft.CodeAnalysis.CSharp.Syntax.InterpolatedStringTextSyntax]) { [void]$format.Append($part.TextToken.ValueText) }
+                else {
+                    $hole = '{' + $values.Count
+                    if ($part.AlignmentClause) { $hole += ',' + $script:Model.GetConstantValue($part.AlignmentClause.Value).Value }
+                    if ($part.FormatClause) { $hole += ':' + $part.FormatClause.FormatStringToken.ValueText }
+                    [void]$format.Append($hole + '}')
+                    $values.Add('(' + (Convert-Value $part.Expression) + ')')
+                }
+            }
+            $literal = "'" + $format.ToString().Replace("'", "''") + "'"
+            return "[string]::Format($literal, [object[]]@($($values -join ', ')))"
+        }
         'IdentifierNameSyntax' {
             $sym = $script:Model.GetSymbolInfo($e).Symbol
             if ($sym -and $sym.Kind.ToString() -in 'Local', 'Parameter') {
