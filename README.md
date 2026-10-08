@@ -61,6 +61,7 @@ the license. Supplemental fixtures cover boundary behavior.
 | Null strings | A typed PowerShell string becomes empty | Preserve null in object storage |
 | Simple class fields and methods | Case-insensitive members and function dispatch differ | Symbol-named fields, constructor factories and explicit receiver functions |
 | Class assignment | Objects must retain shared identity | Preserve the same object reference; null receivers throw |
+| Simple struct assignment, parameters and returns | PowerShell classes have reference semantics | Explicit copies at value boundaries; nested value fields copy, reference fields remain shared |
 
 ## Supported now
 

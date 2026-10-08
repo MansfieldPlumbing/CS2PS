@@ -1,0 +1,6 @@
+[
+ {"Type":"StructBoundaries","Method":"Exercise","Arguments":[1]},
+ {"Type":"StructBoundaries","Method":"Exercise","Arguments":[-5]},
+ {"Type":"StructBoundaries","Method":"Nested","Arguments":[]},
+ {"Type":"StructBoundaries","Method":"Zero","Arguments":[]}
+]
