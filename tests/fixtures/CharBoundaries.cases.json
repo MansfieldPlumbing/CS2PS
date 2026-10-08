@@ -1,0 +1,14 @@
+[
+ {"Type":"CharBoundaries","Method":"Add","Arguments":["A","a"]},
+ {"Type":"CharBoundaries","Method":"Add","Arguments":["\uffff","\uffff"]},
+ {"Type":"CharBoundaries","Method":"Difference","Arguments":["A","a"]},
+ {"Type":"CharBoundaries","Method":"Advance","Arguments":["\uffff",2]},
+ {"Type":"CharBoundaries","Method":"Increment","Arguments":["\uffff"]},
+ {"Type":"CharBoundaries","Method":"CheckedIncrement","Arguments":["\uffff"]},
+ {"Type":"CharBoundaries","Method":"Increment","Arguments":["A"]},
+ {"Type":"CharBoundaries","Method":"Equal","Arguments":["a","A"]},
+ {"Type":"CharBoundaries","Method":"Less","Arguments":["A","a"]},
+ {"Type":"CharBoundaries","Method":"Decimal","Arguments":["\uffff"]},
+ {"Type":"CharBoundaries","Method":"Constant","Arguments":[]},
+ {"Type":"CharBoundaries","Method":"Wrap","Arguments":[-1]}
+]

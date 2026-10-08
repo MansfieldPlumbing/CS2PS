@@ -75,6 +75,7 @@ function Convert-CS2PSInteger($value, [string] $type, [bool] $checked) {
     $modulus = [Numerics.BigInteger]::Pow(2, $bits)
     $min = if ($signed) { -($modulus / 2) } else { [Numerics.BigInteger]::Zero }
     $max = if ($signed) { $modulus / 2 - 1 } else { $modulus - 1 }
+    if ($value -is [char]) { $value = [int]$value }
     $wide = [Numerics.BigInteger]$value
     if ($checked -and ($wide -lt $min -or $wide -gt $max)) { throw [OverflowException]::new() }
     $wide = (($wide % $modulus) + $modulus) % $modulus
@@ -87,6 +88,7 @@ function Convert-CS2PSInteger($value, [string] $type, [bool] $checked) {
     }
 }
 function Invoke-CS2PSInteger($left, $right, [string] $operator, [string] $type, [bool] $checked) {
+    if ($left -is [char]) { $left = [int]$left }; if ($right -is [char]) { $right = [int]$right }
     $l = [Numerics.BigInteger]$left; $r = [Numerics.BigInteger]$right
     $value = switch ($operator) {
         '+' { $l + $r } '-' { $l - $r } '*' { $l * $r }
@@ -124,6 +126,15 @@ function Invoke-CS2PSInteger($left, $right, [string] $operator, [string] $type, 
 }
 function Invoke-CS2PSBoolean([bool] $left, [bool] $right, [string] $operator) {
     switch ($operator) { '&' { return $left -and $right } '|' { return $left -or $right } '^' { return $left -ne $right } }
+}
+function Compare-CS2PSInteger($left, $right, [string] $operator) {
+    if ($left -is [char]) { $left = [int]$left }; if ($right -is [char]) { $right = [int]$right }
+    $comparison = [Numerics.BigInteger]::Compare([Numerics.BigInteger]$left, [Numerics.BigInteger]$right)
+    switch ($operator) {
+        '==' { return $comparison -eq 0 } '!=' { return $comparison -ne 0 }
+        '<' { return $comparison -lt 0 } '>' { return $comparison -gt 0 }
+        '<=' { return $comparison -le 0 } '>=' { return $comparison -ge 0 }
+    }
 }
 function Convert-CS2PSFloatingInteger($value, [string] $type, [bool] $checked) {
     if ($value -is [decimal]) { return Convert-CS2PSInteger ([Numerics.BigInteger]$value) $type $true }
@@ -221,6 +232,12 @@ function Test-SourceStruct($symbol) { $symbol -and $script:StructTypes.Contains(
 function Convert-Value($expr) {
     $text = Convert-Expression $expr
     if (Test-SourceStruct (Get-ExprType $expr)) { return "(Copy-$(Get-PsTypeName (Get-ExprType $expr)) ($text))" }
+    $source = Get-ExprType $expr
+    $target = $script:Model.GetTypeInfo($expr).ConvertedType
+    if ($source -and $target -and $source.SpecialType -ne $target.SpecialType -and ((Test-Integral $target) -or (Test-Floating $target))) {
+        if ($source.SpecialType.ToString() -eq 'System_Char') { $text = "[int]($text)" }
+        return "[$(Get-PsTypeName $target)]($text)"
+    }
     return $text
 }
 function Get-FieldName($symbol) { 'f' + $symbol.DeclaringSyntaxReferences[0].Span.Start }
@@ -286,7 +303,7 @@ function Convert-TypeDeclaration($node) {
     return $text
 }
 
-function Test-Integral($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Int32', 'System_Int64', 'System_Int16', 'System_Byte', 'System_UInt32', 'System_UInt64', 'System_SByte', 'System_UInt16' }
+function Test-Integral($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Int32', 'System_Int64', 'System_Int16', 'System_Byte', 'System_UInt32', 'System_UInt64', 'System_SByte', 'System_UInt16', 'System_Char' }
 function Test-Floating($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Double', 'System_Single', 'System_Decimal' }
 function Test-String($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -eq 'System_String' }
 function Get-ExprType($expr) { $script:Model.GetTypeInfo($expr).Type }
@@ -460,7 +477,7 @@ function Convert-Expression($e) {
             if ($v -is [string]) { return "'" + ($v -replace "'", "''") + "'" }
             if ($v -is [bool]) { return $(if ($v) { '$true' } else { '$false' }) }
             if ($null -eq $v) { return '$null' }
-            if ($v -is [char]) { return "[char]'$v'" }
+            if ($v -is [char]) { return "[char]$([int]$v)" }
             $t = Get-ExprType $e
             $literal = $v.ToString([Globalization.CultureInfo]::InvariantCulture)
             return "[$(Get-PsTypeName $t)]'$literal'"
@@ -524,6 +541,7 @@ function Convert-Expression($e) {
             $target = $script:Model.GetTypeInfo($e.Type).Type
             $source = Get-ExprType $e.Expression
             $x = Convert-Expression $e.Expression
+            if ($source.SpecialType.ToString() -eq 'System_Char' -and (Test-Floating $target)) { return "[$(Get-PsTypeName $target)][int]($x)" }
             if ((Test-Integral $target) -and (Test-Integral $source)) { return "(Convert-CS2PSInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
             if ((Test-Integral $target) -and (Test-Floating $source)) { return "(Convert-CS2PSFloatingInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
             return "[$(Get-PsTypeName $target)]$x"
@@ -609,6 +627,7 @@ function Convert-Binary($e) {
     $lt = Get-ExprType $e.Left; $rt = Get-ExprType $e.Right
     $op = $e.OperatorToken.Text
     $strings = (Test-String $lt) -or (Test-String $rt)
+    if ($op -in '==','!=','<','>','<=','>=' -and (Test-Integral $lt) -and (Test-Integral $rt)) { return "(Compare-CS2PSInteger ($l) ($r) '$op')" }
     if ($op -in '&','|','^' -and (Get-ExprType $e).SpecialType.ToString() -eq 'System_Boolean') { return "(Invoke-CS2PSBoolean ($l) ($r) '$op')" }
     if ($op -in '&','|','^','<<','>>','>>>' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
     if ($op -in '+','-','*','/','%' -and (Test-Integral (Get-ExprType $e))) {
