@@ -1,0 +1,185 @@
+[
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      -5,
+      80
+    ]
+  },
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      0,
+      80
+    ]
+  },
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      33,
+      80
+    ]
+  },
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      57,
+      80
+    ]
+  },
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      100,
+      80
+    ]
+  },
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      150,
+      80
+    ]
+  },
+  {
+    "Method": "BarWidth",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      7,
+      3
+    ]
+  },
+  {
+    "Method": "FormatLabel",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      "Copying",
+      42
+    ]
+  },
+  {
+    "Method": "FormatLabel",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      "A very long activity name",
+      5
+    ]
+  },
+  {
+    "Method": "IsSame",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      "a",
+      "A"
+    ]
+  },
+  {
+    "Method": "IsSame",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      "x",
+      "x"
+    ]
+  },
+  {
+    "Method": "SumTo",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      0
+    ]
+  },
+  {
+    "Method": "SumTo",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      1
+    ]
+  },
+  {
+    "Method": "SumTo",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      10
+    ]
+  },
+  {
+    "Method": "SumTo",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      100
+    ]
+  },
+  {
+    "Method": "Ratio",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      1,
+      3
+    ]
+  },
+  {
+    "Method": "Ratio",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      7,
+      2
+    ]
+  },
+  {
+    "Method": "Midpoint",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      1.0,
+      2.0
+    ]
+  },
+  {
+    "Method": "Midpoint",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      2.0,
+      3.0
+    ]
+  },
+  {
+    "Method": "Midpoint",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      -3.0,
+      0.0
+    ]
+  },
+  {
+    "Method": "Clamp",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      5,
+      0,
+      10
+    ]
+  },
+  {
+    "Method": "Clamp",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      -1,
+      0,
+      10
+    ]
+  },
+  {
+    "Method": "Clamp",
+    "Type": "ProgressLayout",
+    "Arguments": [
+      11,
+      0,
+      10
+    ]
+  }
+]

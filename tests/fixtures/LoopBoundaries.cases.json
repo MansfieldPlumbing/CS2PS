@@ -1,0 +1,15 @@
+[
+ {"Type":"LoopBoundaries","Method":"Scan","Arguments":[[]]},
+ {"Type":"LoopBoundaries","Method":"Scan","Arguments":[[1,2,3]]},
+ {"Type":"LoopBoundaries","Method":"Scan","Arguments":[[-2,5,99,1]]},
+ {"Type":"LoopBoundaries","Method":"ScanList","Arguments":[[]]},
+ {"Type":"LoopBoundaries","Method":"ScanList","Arguments":[[1,2,3]]},
+ {"Type":"LoopBoundaries","Method":"Names","Arguments":[2,5]},
+ {"Type":"LoopBoundaries","Method":"Index","Arguments":[[2],-1]},
+ {"Type":"LoopBoundaries","Method":"Index","Arguments":[[2],1]},
+ {"Type":"LoopBoundaries","Method":"Index","Arguments":[[2],0]},
+ {"Type":"LoopBoundaries","Method":"Mutate","Arguments":[[1]]},
+ {"Type":"LoopBoundaries","Method":"Identity","Arguments":[[]]},
+ {"Type":"LoopBoundaries","Method":"Identity","Arguments":[[3]]},
+ {"Type":"LoopBoundaries","Method":"Identity","Arguments":[[3,7]]}
+]

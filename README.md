@@ -37,6 +37,26 @@ into the ignored `build/` folder as a comparison only, calls both with the
 same inputs and reports every difference. The first fixture
 (`tests/fixtures/ProgressLayout.cs`): 23 calls, 0 differences.
 
+With no arguments the harness checks every `.cs` fixture using its adjacent
+`.cases.json`, comparing value types, ordinal strings, array shape, console
+output and exception types. Generated scripts are parsed before loading.
+`tests/Test-Diagnostics.ps1` checks marked, line-numbered, non-executable
+output for unsupported input. Full Language Mode is required for Roslyn's
+managed semantic API and the comparison assembly; no protection is disabled.
+
+The loop fixtures are extracted from MIT-licensed `dotnet/roslyn` at commit
+`ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da`; fixture headers cite exact source
+locations, upstream file hashes and test names. `ROSLYN-LICENSE.txt` retains
+the license. Supplemental fixtures cover boundary behavior.
+
+| C# | PowerShell difference | Explicit translation |
+|---|---|---|
+| Distinct symbols, including `value`/`Value` | Names ignore case; automatic variables can collide | Syntax-position symbol names (`v123`) |
+| Array/List indexing | Negative indices count backward; array misses return null | Bounds/null checks and the C# exception type |
+| `foreach` over `List<T>` | Collection mutation may go undetected | Real .NET enumerator with disposal in `finally` |
+| `return` of an array | The pipeline enumerates it | Unary comma preserves the array, including empty/singleton arrays |
+| Expression statements | Method/assignment results can enter the pipeline | `[void]` suppresses incidental output |
+
 ## Supported now
 
 Static methods; parameters and locals of simple types; `if`/`else`, `for`,
