@@ -1,0 +1,15 @@
+[
+ {"Type":"SwitchBoundaries","Method":"Match","Arguments":["a"]},
+ {"Type":"SwitchBoundaries","Method":"Match","Arguments":["A"]},
+ {"Type":"SwitchBoundaries","Method":"Match","Arguments":["b"]},
+ {"Type":"SwitchBoundaries","Method":"Match","Arguments":[null]},
+ {"Type":"SwitchBoundaries","Method":"Expression","Arguments":["a"]},
+ {"Type":"SwitchBoundaries","Method":"Expression","Arguments":["A"]},
+ {"Type":"SwitchBoundaries","Method":"Expression","Arguments":[null]},
+ {"Type":"SwitchBoundaries","Method":"Expression","Arguments":["b"]},
+ {"Type":"SwitchBoundaries","Method":"Missing","Arguments":[1]},
+ {"Type":"SwitchBoundaries","Method":"Missing","Arguments":[2]},
+ {"Type":"SwitchBoundaries","Method":"Guard","Arguments":[1]},
+ {"Type":"SwitchBoundaries","Method":"Guard","Arguments":[2]},
+ {"Type":"SwitchBoundaries","Method":"Flow","Arguments":[]}
+]

@@ -1,0 +1,6 @@
+[
+ {"Type":"Program","Method":"GetBool","Arguments":["a"]},
+ {"Type":"Program","Method":"GetBool","Arguments":["b"]},
+ {"Type":"Program","Method":"GetBool","Arguments":["A"]},
+ {"Type":"Program","Method":"GetBool","Arguments":[null]}
+]

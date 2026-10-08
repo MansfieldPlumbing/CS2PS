@@ -56,6 +56,9 @@ the license. Supplemental fixtures cover boundary behavior.
 | `foreach` over `List<T>` | Collection mutation may go undetected | Real .NET enumerator with disposal in `finally` |
 | `return` of an array | The pipeline enumerates it | Unary comma preserves the array, including empty/singleton arrays |
 | Expression statements | Method/assignment results can enter the pipeline | `[void]` suppresses incidental output |
+| `switch` statements/expressions | PowerShell matching ignores case and enumerates inputs | Evaluate once, ordinal constant tests, first matching arm |
+| `continue` inside a switch | PowerShell can continue the switch | Label the actual enclosing C# loop |
+| Null strings | A typed PowerShell string becomes empty | Preserve null in object storage |
 
 ## Supported now
 

@@ -106,6 +106,10 @@ function Get-PsTypeName($typeSymbol) {
 
 # Syntax positions identify declared symbols, including shadowed and case-only names.
 function Get-VariableName($symbol) { 'v' + $symbol.DeclaringSyntaxReferences[0].Span.Start }
+function Get-StorageType($symbol) {
+    if (Test-String $symbol) { return 'object' } # [string] silently converts null to empty.
+    Get-PsTypeName $symbol
+}
 
 function Test-Integral($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Int32', 'System_Int64', 'System_Int16', 'System_Byte', 'System_UInt32', 'System_UInt64', 'System_SByte', 'System_UInt16' }
 function Test-Floating($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Double', 'System_Single', 'System_Decimal' }
@@ -132,14 +136,14 @@ function Convert-Method($type, $m) {
     [void]$sb.AppendLine("function $name {")
     [void]$sb.AppendLine('    [CmdletBinding()]')
     if ($returnType) { [void]$sb.AppendLine("    [OutputType([$returnType])]") }
-    $params = foreach ($p in $symbol.Parameters) { "        [AllowNull()] [AllowEmptyString()] [AllowEmptyCollection()] [$(Get-PsTypeName $p.Type)] `$$(Get-VariableName $p)" }
+    $params = foreach ($p in $symbol.Parameters) { "        [AllowNull()] [AllowEmptyString()] [AllowEmptyCollection()] [$(Get-StorageType $p.Type)] `$$(Get-VariableName $p)" }
     [void]$sb.AppendLine('    param(')
     if ($params) { [void]$sb.AppendLine(($params -join ",`n")) }
     [void]$sb.AppendLine('    )')
     $line = $m.GetLocation().GetLineSpan().StartLinePosition.Line + 1
     [void]$sb.AppendLine("    # From C# $($type.Identifier.Text).$($m.Identifier.Text) (line $line).")
     if ($m.Body) { foreach ($s in $m.Body.Statements) { [void]$sb.Append((Convert-Statement $s 1)) } }
-    elseif ($m.ExpressionBody) { [void]$sb.AppendLine("    return $(Convert-Expression $m.ExpressionBody.Expression)") }
+    elseif ($m.ExpressionBody) { [void]$sb.AppendLine("    return ,($(Convert-Expression $m.ExpressionBody.Expression))") }
     [void]$sb.Append('}')
     $sb.ToString()
 }
@@ -149,7 +153,7 @@ function Convert-Statement($s, [int] $depth) {
     switch ($s.GetType().Name) {
         'LocalDeclarationStatementSyntax' {
             $lines = foreach ($v in $s.Declaration.Variables) {
-                $t = Get-PsTypeName ($script:Model.GetDeclaredSymbol($v).Type)
+                $t = Get-StorageType ($script:Model.GetDeclaredSymbol($v).Type)
                 $init = if ($v.Initializer) { ' = ' + (Convert-Expression $v.Initializer.Value) } else { '' }
                 "$pad[$t] `$$(Get-VariableName ($script:Model.GetDeclaredSymbol($v)))$init`n"
             }
@@ -174,7 +178,7 @@ function Convert-Statement($s, [int] $depth) {
             $init = if ($s.Declaration) { ($s.Declaration.Variables | ForEach-Object { "[$(Get-PsTypeName ($script:Model.GetDeclaredSymbol($_).Type))] `$$(Get-VariableName ($script:Model.GetDeclaredSymbol($_))) = $(Convert-Expression $_.Initializer.Value)" }) -join '; ' } else { ($s.Initializers | ForEach-Object { '[void](' + (Convert-Expression $_) + ')' }) -join '; ' }
             $cond = if ($s.Condition) { Convert-Expression $s.Condition } else { '$true' }
             $inc = ($s.Incrementors | ForEach-Object { '[void](' + (Convert-Expression $_) + ')' }) -join '; '
-            return "${pad}$init`n${pad}for (; $cond; `$($inc)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n"
+            return "${pad}$init`n${pad}:loop$($s.Span.Start) for (; $cond; `$($inc)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n"
         }
         'ForEachStatementSyntax' {
             $t = Get-ExprType $s.Expression
@@ -185,11 +189,34 @@ function Convert-Statement($s, [int] $depth) {
             $id = $s.Span.Start
             $v = Get-VariableName ($script:Model.GetDeclaredSymbol($s))
             # Use a real enumerator: List<T> must detect mutation; evaluate collection once.
-            return "${pad}`$enumerator$id = ($(Convert-Expression $s.Expression)).GetEnumerator()`n${pad}try {`n${pad}    while (`$enumerator$id.MoveNext()) {`n${pad}        [$((Get-PsTypeName ($script:Model.GetDeclaredSymbol($s).Type)))] `$$v = `$enumerator$id.Current`n$(Convert-Embedded $s.Statement ($depth + 2))${pad}    }`n${pad}} finally {`n${pad}    if (`$enumerator$id -is [IDisposable]) { `$enumerator$id.Dispose() }`n${pad}}`n"
+            return "${pad}`$enumerator$id = ($(Convert-Expression $s.Expression)).GetEnumerator()`n${pad}try {`n${pad}    :loop$id while (`$enumerator$id.MoveNext()) {`n${pad}        [$((Get-PsTypeName ($script:Model.GetDeclaredSymbol($s).Type)))] `$$v = `$enumerator$id.Current`n$(Convert-Embedded $s.Statement ($depth + 2))${pad}    }`n${pad}} finally {`n${pad}    if (`$enumerator$id -is [IDisposable]) { `$enumerator$id.Dispose() }`n${pad}}`n"
         }
-        'WhileStatementSyntax' { return "${pad}while ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n" }
-        'BreakStatementSyntax' { return "${pad}break`n" }
-        'ContinueStatementSyntax' { return "${pad}continue`n" }
+        'WhileStatementSyntax' { return "${pad}:loop$($s.Span.Start) while ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n" }
+        'BreakStatementSyntax' { return "${pad}break $(Get-JumpLabel $s $false)`n" }
+        'ContinueStatementSyntax' { return "${pad}continue $(Get-JumpLabel $s $true)`n" }
+        'SwitchStatementSyntax' {
+            $id = $s.Span.Start; $subject = "`$switchValue$id"
+            $text = "${pad}$subject = $(Convert-Expression $s.Expression)`n${pad}:switch$id do {`n"
+            $sections = @($s.Sections | Where-Object { -not @($_.Labels | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.DefaultSwitchLabelSyntax] }).Count })
+            $defaults = @($s.Sections | Where-Object { @($_.Labels | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.DefaultSwitchLabelSyntax] }).Count })
+            $first = $true
+            foreach ($section in $sections) {
+                $tests = foreach ($label in $section.Labels) {
+                    if ($label -is [Microsoft.CodeAnalysis.CSharp.Syntax.CaseSwitchLabelSyntax]) { "($subject -ceq ($(Convert-Expression $label.Value)))" }
+                    else { Add-Diagnostic $label 'pattern switch label'; '$false' }
+                }
+                $keyword = if ($first) { 'if' } else { 'elseif' }; $first = $false
+                $text += "${pad}    $keyword ($($tests -join ' -or ')) {`n"
+                foreach ($statement in $section.Statements) { $text += Convert-Statement $statement ($depth + 2) }
+                $text += "${pad}    }`n"
+            }
+            foreach ($section in $defaults) {
+                if (-not $first) { $text += "${pad}    else {`n" }
+                foreach ($statement in $section.Statements) { $text += Convert-Statement $statement ($depth + 2) }
+                if (-not $first) { $text += "${pad}    }`n" }
+            }
+            return $text + "${pad}} while (`$false)`n"
+        }
         default { Add-Diagnostic $s "statement $($s.GetType().Name) is not supported"; return '' }
     }
 }
@@ -197,6 +224,24 @@ function Convert-Statement($s, [int] $depth) {
 function Convert-Embedded($s, [int] $depth) {
     if ($s -is [Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax]) { return (($s.Statements | ForEach-Object { Convert-Statement $_ $depth }) -join '') }
     Convert-Statement $s $depth
+}
+
+function Get-JumpLabel($s, [bool] $continue) {
+    $parent = $s.Parent
+    while ($parent) {
+        if ($parent.GetType().Name -in 'ForStatementSyntax','ForEachStatementSyntax','WhileStatementSyntax') { return 'loop' + $parent.Span.Start }
+        if (-not $continue -and $parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.SwitchStatementSyntax]) { return 'switch' + $parent.Span.Start }
+        $parent = $parent.Parent
+    }
+    Add-Diagnostic $s 'jump target is outside the supported subset'
+}
+
+function Convert-Pattern($pattern, [string] $subject) {
+    switch ($pattern.GetType().Name) {
+        'ConstantPatternSyntax' { return "($subject -ceq ($(Convert-Expression $pattern.Expression)))" }
+        'DiscardPatternSyntax' { return '$true' }
+        default { Add-Diagnostic $pattern "pattern $($pattern.GetType().Name)"; return '$false' }
+    }
 }
 
 function Convert-Expression($e) {
@@ -237,6 +282,18 @@ function Convert-Expression($e) {
             return "[$(Get-PsTypeName $target)]$x"
         }
         'BinaryExpressionSyntax' { return (Convert-Binary $e) }
+        'SwitchExpressionSyntax' {
+            $subject = "`$switchValue$($e.Span.Start)"
+            $text = "`$($subject = $(Convert-Expression $e.GoverningExpression); "
+            $first = $true
+            foreach ($arm in $e.Arms) {
+                $test = Convert-Pattern $arm.Pattern $subject
+                if ($arm.WhenClause) { $test = "($test) -and ($(Convert-Expression $arm.WhenClause.Condition))" }
+                $keyword = if ($first) { 'if' } else { 'elseif' }; $first = $false
+                $text += "$keyword ($test) { ,($(Convert-Expression $arm.Expression)) } "
+            }
+            return $text + "else { throw [System.Runtime.CompilerServices.SwitchExpressionException]::new($subject) })"
+        }
         'ArrayCreationExpressionSyntax' {
             $t = Get-ExprType $e
             if ($t.Rank -ne 1) { Add-Diagnostic $e 'multidimensional array'; return '$null' }
