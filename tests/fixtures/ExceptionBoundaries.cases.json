@@ -1,0 +1,13 @@
+[
+ {"Type":"ExceptionBoundaries","Method":"Catch","Arguments":[0]},
+ {"Type":"ExceptionBoundaries","Method":"Catch","Arguments":[1]},
+ {"Type":"ExceptionBoundaries","Method":"Catch","Arguments":[2]},
+ {"Type":"ExceptionBoundaries","Method":"ReturnFinally","Arguments":[]},
+ {"Type":"ExceptionBoundaries","Method":"FinallyThrows","Arguments":[]},
+ {"Type":"ExceptionBoundaries","Method":"Rethrow","Arguments":[]},
+ {"Type":"ExceptionBoundaries","Method":"ThrowNull","Arguments":[]},
+ {"Type":"ExceptionBoundaries","Method":"ThrowExpression","Arguments":[true]},
+ {"Type":"ExceptionBoundaries","Method":"ThrowExpression","Arguments":[false]},
+ {"Type":"ExceptionBoundaries","Method":"RuntimeCatch","Arguments":[]},
+ {"Type":"ExceptionBoundaries","Method":"NullMethod","Arguments":[]}
+]

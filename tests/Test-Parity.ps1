@@ -14,7 +14,8 @@ $refs = [Microsoft.CodeAnalysis.MetadataReference[]]@('System.Private.CoreLib.dl
 $opts = [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::DynamicallyLinkedLibrary)
 
 function Get-RootException($exception) {
-    while ($exception.InnerException -and ($exception -is [Reflection.TargetInvocationException] -or $exception -is [System.Management.Automation.RuntimeException])) { $exception = $exception.InnerException }
+    if ($exception -is [Reflection.TargetInvocationException]) { $exception = $exception.InnerException }
+    while ($exception.InnerException -and $exception -is [System.Management.Automation.RuntimeException]) { $exception = $exception.InnerException }
     $exception.GetType().FullName
 }
 function Convert-InputValue($value, [type] $type) {

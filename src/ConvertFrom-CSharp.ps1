@@ -69,6 +69,14 @@ function Get-CS2PSReceiver($value) {
     if ($null -eq $value) { throw [NullReferenceException]::new() }
     return ,$value
 }
+function Get-CS2PSException($exception) {
+    while ($exception -is [System.Management.Automation.RuntimeException] -and $exception.InnerException) { $exception = $exception.InnerException }
+    return ,$exception
+}
+function Get-CS2PSThrowException($value) {
+    if ($null -eq $value) { return [NullReferenceException]::new() }
+    return ,$value
+}
 function Convert-CS2PSInteger($value, [string] $type, [bool] $checked) {
     $bits = switch ($type) { 'sbyte' {8} 'byte' {8} 'short' {16} 'ushort' {16} 'char' {16} 'int' {32} 'uint' {32} 'long' {64} 'ulong' {64} }
     $signed = $type -in 'sbyte','short','int','long'
@@ -372,6 +380,34 @@ function Convert-Statement($s, [int] $depth) {
         'ReturnStatementSyntax' { return $(if ($s.Expression) { "${pad}return ,($(Convert-Value $s.Expression))`n" } else { "${pad}return`n" }) }
         'EmptyStatementSyntax' { return '' }
         'CheckedStatementSyntax' { return Convert-Embedded $s.Block $depth }
+        'ThrowStatementSyntax' {
+            if ($s.Expression) { return "${pad}throw (Get-CS2PSThrowException ($(Convert-Value $s.Expression)))`n" }
+            return "${pad}throw`n"
+        }
+        'TryStatementSyntax' {
+            $text = "${pad}try {`n$(Convert-Embedded $s.Block ($depth + 1))${pad}}"
+            if ($s.Catches.Count) {
+                $exception = "`$exception$($s.Span.Start)"
+                $text += " catch {`n${pad}    $exception = Get-CS2PSException `$_.Exception`n"
+                $first = $true
+                foreach ($clause in $s.Catches) {
+                    if ($clause.Filter) { Add-Diagnostic $clause.Filter 'exception filters require pre-unwind evaluation'; continue }
+                    $typeName = if ($clause.Declaration) { Get-PsTypeName ($script:Model.GetTypeInfo($clause.Declaration.Type).Type) } else { 'Exception' }
+                    $keyword = if ($first) { 'if' } else { 'elseif' }; $first = $false
+                    $text += "${pad}    $keyword ($exception -is [$typeName]) {`n"
+                    if ($clause.Declaration -and $clause.Declaration.Identifier.Text) {
+                        $local = $script:Model.GetDeclaredSymbol($clause.Declaration)
+                        $text += "${pad}        [$typeName] `$$(Get-VariableName $local) = $exception`n"
+                    }
+                    $text += Convert-Embedded $clause.Block ($depth + 2)
+                    $text += "${pad}    }`n"
+                }
+                if (-not $first) { $text += "${pad}    else { throw }`n" }
+                $text += "${pad}}"
+            }
+            if ($s.Finally) { $text += " finally {`n$(Convert-Embedded $s.Finally.Block ($depth + 1))${pad}}" }
+            return "$text`n"
+        }
         'BlockSyntax' { return (($s.Statements | ForEach-Object { Convert-Statement $_ $depth }) -join '') }
         'IfStatementSyntax' {
             $text = "${pad}if ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}"
@@ -548,6 +584,7 @@ function Convert-Expression($e) {
         }
         'BinaryExpressionSyntax' { return (Convert-Binary $e) }
         'CheckedExpressionSyntax' { return Convert-Expression $e.Expression }
+        'ThrowExpressionSyntax' { return "`$(throw (Get-CS2PSThrowException ($(Convert-Value $e.Expression))))" }
         'DefaultExpressionSyntax' {
             $t = Get-ExprType $e
             if (Test-SourceStruct $t) { return "[$(Get-PsTypeName $t)]::new()" }
@@ -605,7 +642,7 @@ function Convert-Expression($e) {
             }
             if ($e.Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax]) {
                 if ($sym -and $sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$($sym.Name)($args_)" }
-                return "$(Convert-Expression $e.Expression.Expression).$($e.Expression.Name.Identifier.Text)($args_)"
+                return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression.Expression))).$($e.Expression.Name.Identifier.Text)($args_)"
             }
             Add-Diagnostic $e "call to $($e.Expression) is not supported yet"; return "# cs2ps: unsupported call $e"
         }
@@ -616,7 +653,7 @@ function Convert-Expression($e) {
                 return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression))).$(Get-FieldName $sym)"
             }
             if ($sym -and $sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$($sym.Name)" }
-            return "$(Convert-Expression $e.Expression).$($e.Name.Identifier.Text)"
+            return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression))).$($e.Name.Identifier.Text)"
         }
         default { Add-Diagnostic $e "expression $($e.GetType().Name) is not supported yet"; return "<# cs2ps: unsupported $($e.GetType().Name) #>" }
     }

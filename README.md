@@ -68,6 +68,7 @@ the license. Supplemental fixtures cover boundary behavior.
 | Shifts, bitwise operations and complement | Width, signedness and shift counts can differ | Typed results, count masks of 31/63, arithmetic/logical right shift |
 | Boolean `&` / `\|` / `^` | `-and` / `-or` short-circuit | Evaluate both operands before combining |
 | `char` arithmetic and comparison | PowerShell may treat characters as text | UTF-16 numeric promotion, ordinal comparison, checked overflow or 16-bit wrapping |
+| Exceptions, typed catches, rethrow and `finally` | PowerShell wraps runtime exceptions | Unwrap invocation wrappers, dispatch catches in order, retain rethrow and finally control flow; null throws become `NullReferenceException` |
 
 ## Supported now
 
