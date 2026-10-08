@@ -64,6 +64,7 @@ the license. Supplemental fixtures cover boundary behavior.
 | Simple struct assignment, parameters and returns | PowerShell classes have reference semantics | Explicit copies at value boundaries; nested value fields copy, reference fields remain shared |
 | `out`/`ref` locals and parameters | Ordinary function arguments copy their values | `[ref]` cells and `.Value` accesses; aliases and forwarding retain the same storage |
 | String interpolation and composite formatting | Expansion and formatting rules differ | .NET composite format strings, ordered values, alignment, format specifiers and current culture |
+| Checked/unchecked integer arithmetic and narrowing | PowerShell widens arithmetic and rejects out-of-range casts | Exact wide intermediates, fixed-width wrapping or `OverflowException`, with lexical context |
 
 ## Supported now
 

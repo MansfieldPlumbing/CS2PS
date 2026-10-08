@@ -69,6 +69,63 @@ function Get-CS2PSReceiver($value) {
     if ($null -eq $value) { throw [NullReferenceException]::new() }
     return ,$value
 }
+function Convert-CS2PSInteger($value, [string] $type, [bool] $checked) {
+    $bits = switch ($type) { 'sbyte' {8} 'byte' {8} 'short' {16} 'ushort' {16} 'char' {16} 'int' {32} 'uint' {32} 'long' {64} 'ulong' {64} }
+    $signed = $type -in 'sbyte','short','int','long'
+    $modulus = [Numerics.BigInteger]::Pow(2, $bits)
+    $min = if ($signed) { -($modulus / 2) } else { [Numerics.BigInteger]::Zero }
+    $max = if ($signed) { $modulus / 2 - 1 } else { $modulus - 1 }
+    $wide = [Numerics.BigInteger]$value
+    if ($checked -and ($wide -lt $min -or $wide -gt $max)) { throw [OverflowException]::new() }
+    $wide = (($wide % $modulus) + $modulus) % $modulus
+    if ($signed -and $wide -gt $max) { $wide -= $modulus }
+    switch ($type) {
+        'sbyte' { return [sbyte]$wide } 'byte' { return [byte]$wide }
+        'short' { return [short]$wide } 'ushort' { return [ushort]$wide }
+        'char' { return [char][ushort]$wide } 'int' { return [int]$wide }
+        'uint' { return [uint]$wide } 'long' { return [long]$wide } 'ulong' { return [ulong]$wide }
+    }
+}
+function Invoke-CS2PSInteger($left, $right, [string] $operator, [string] $type, [bool] $checked) {
+    $l = [Numerics.BigInteger]$left; $r = [Numerics.BigInteger]$right
+    $value = switch ($operator) {
+        '+' { $l + $r } '-' { $l - $r } '*' { $l * $r }
+        '/' {
+            if ($r.IsZero) { throw [DivideByZeroException]::new() }
+            # Signed minimum / -1 throws even in an unchecked C# context.
+            if ((($type -eq 'int' -and $l -eq [int]::MinValue) -or ($type -eq 'long' -and $l -eq [long]::MinValue)) -and $r -eq -1) { throw [OverflowException]::new() }
+            [Numerics.BigInteger]::Divide($l, $r)
+        }
+        '%' {
+            if ($r.IsZero) { throw [DivideByZeroException]::new() }
+            if ((($type -eq 'int' -and $l -eq [int]::MinValue) -or ($type -eq 'long' -and $l -eq [long]::MinValue)) -and $r -eq -1) { throw [OverflowException]::new() }
+            [Numerics.BigInteger]::Remainder($l, $r)
+        }
+        default { throw [NotSupportedException]::new('Integer operator') }
+    }
+    Convert-CS2PSInteger $value $type $checked
+}
+function Convert-CS2PSFloatingInteger($value, [string] $type, [bool] $checked) {
+    if ($value -is [decimal]) { return Convert-CS2PSInteger ([Numerics.BigInteger]$value) $type $true }
+    if ($checked) {
+        if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw [OverflowException]::new() }
+        return Convert-CS2PSInteger ([Numerics.BigInteger]::new([double]$value)) $type $true
+    }
+    # .NET 9+ specifies saturating float/double conversions.
+    $result = switch ($type) {
+        'int' { [int]::CreateSaturating[double]($value) }
+        'uint' { [uint]::CreateSaturating[double]($value) }
+        'long' { [long]::CreateSaturating[double]($value) }
+        'ulong' { [ulong]::CreateSaturating[double]($value) }
+        'byte' { [byte]::CreateSaturating[double]($value) }
+        'sbyte' { [sbyte]::CreateSaturating[double]($value) }
+        'short' { [short]::CreateSaturating[double]($value) }
+        'ushort' { [ushort]::CreateSaturating[double]($value) }
+        'char' { [ushort]::CreateSaturating[double]($value) }
+        default { throw [NotSupportedException]::new('Floating conversion target') }
+    }
+    Convert-CS2PSInteger $result $type $false
+}
 '@)
     $types = @($tree.GetRoot().DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] })
     $usedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -120,6 +177,7 @@ function Get-PsTypeName($typeSymbol) {
         'System_Int32' { return 'int' } 'System_Int64' { return 'long' } 'System_Double' { return 'double' }
         'System_Single' { return 'float' } 'System_Boolean' { return 'bool' } 'System_String' { return 'string' }
         'System_Char' { return 'char' } 'System_Byte' { return 'byte' } 'System_Int16' { return 'short' }
+        'System_SByte' { return 'sbyte' } 'System_UInt16' { return 'ushort' }
         'System_UInt32' { return 'uint' } 'System_UInt64' { return 'ulong' } 'System_Decimal' { return 'decimal' }
         'System_Void' { return $null }
     }
@@ -212,6 +270,13 @@ function Test-Integral($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.T
 function Test-Floating($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Double', 'System_Single', 'System_Decimal' }
 function Test-String($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -eq 'System_String' }
 function Get-ExprType($expr) { $script:Model.GetTypeInfo($expr).Type }
+function Get-CheckedFlag($node) {
+    while ($node) {
+        if ($node.GetType().Name -in 'CheckedExpressionSyntax','CheckedStatementSyntax') { return $(if ($node.Keyword.Text -ceq 'checked') { '$true' } else { '$false' }) }
+        $node = $node.Parent
+    }
+    '$false'
+}
 
 # Method names map to approved verbs; the rest become Get- (value) or Invoke- (void).
 function Get-FunctionName([string] $class, [string] $method, [bool] $returnsValue) {
@@ -269,6 +334,7 @@ function Convert-Statement($s, [int] $depth) {
         'ExpressionStatementSyntax' { return "${pad}[void]($(Convert-Expression $s.Expression))`n" }
         'ReturnStatementSyntax' { return $(if ($s.Expression) { "${pad}return ,($(Convert-Value $s.Expression))`n" } else { "${pad}return`n" }) }
         'EmptyStatementSyntax' { return '' }
+        'CheckedStatementSyntax' { return Convert-Embedded $s.Block $depth }
         'BlockSyntax' { return (($s.Statements | ForEach-Object { Convert-Statement $_ $depth }) -join '') }
         'IfStatementSyntax' {
             $text = "${pad}if ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}"
@@ -375,7 +441,9 @@ function Convert-Expression($e) {
             if ($v -is [bool]) { return $(if ($v) { '$true' } else { '$false' }) }
             if ($null -eq $v) { return '$null' }
             if ($v -is [char]) { return "[char]'$v'" }
-            return $e.Token.Text -replace '[fFdDmM]$', ''
+            $t = Get-ExprType $e
+            $literal = $v.ToString([Globalization.CultureInfo]::InvariantCulture)
+            return "[$(Get-PsTypeName $t)]'$literal'"
         }
         'InterpolatedStringExpressionSyntax' {
             $format = [Text.StringBuilder]::new(); $values = [System.Collections.Generic.List[string]]::new()
@@ -410,26 +478,37 @@ function Convert-Expression($e) {
         'PrefixUnaryExpressionSyntax' {
             $op = $e.OperatorToken.Text
             $x = Convert-Expression $e.Operand
-            switch ($op) { '!' { return "-not $x" } '-' { return "-$x" } '++' { return "++$x" } '--' { return "--$x" } default { Add-Diagnostic $e "prefix $op"; return "$op$x" } }
+            if ($op -in '++','--') { return Convert-Increment $e $false }
+            if ($op -eq '-' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger 0 ($x) '-' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))" }
+            switch ($op) { '!' { return "-not ($x)" } '-' { return "-($x)" } '+' { return "($x)" } default { Add-Diagnostic $e "prefix $op"; return '$null' } }
         }
-        'PostfixUnaryExpressionSyntax' { return "$(Convert-Expression $e.Operand)$($e.OperatorToken.Text)" }
+        'PostfixUnaryExpressionSyntax' { return Convert-Increment $e $true }
         'AssignmentExpressionSyntax' {
             if ($e.Left -is [Microsoft.CodeAnalysis.CSharp.Syntax.ThisExpressionSyntax]) { Add-Diagnostic $e 'assignment to this'; return '$null' }
             if ($e.Left -is [Microsoft.CodeAnalysis.CSharp.Syntax.ElementAccessExpressionSyntax]) {
                 if ($e.OperatorToken.Text -ne '=') { Add-Diagnostic $e 'compound element assignment'; return '$null' }
                 return "(Set-CS2PSElement ($(Convert-Expression $e.Left.Expression)) ($(Convert-Expression $e.Left.ArgumentList.Arguments[0].Expression)) ($(Convert-Value $e.Right)))"
             }
-            return "$(Convert-Expression $e.Left) $($e.OperatorToken.Text) $(Convert-Value $e.Right)"
+            $left = Convert-Expression $e.Left; $right = Convert-Value $e.Right
+            $op = $e.OperatorToken.Text
+            if ($op -ne '=' -and (Test-Integral (Get-ExprType $e.Left))) {
+                if (@($e.Left.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax] }).Count) { Add-Diagnostic $e 'compound assignment with effectful receiver'; return '$null' }
+                return "$left = (Invoke-CS2PSInteger ($left) ($right) '$($op.TrimEnd('='))' '$(Get-PsTypeName (Get-ExprType $e.Left))' $(Get-CheckedFlag $e))"
+            }
+            if ($op -eq '+=' -and (Test-String (Get-ExprType $e.Left))) { return "$left = [string]::Concat($left, $right)" }
+            return "$left $op $right"
         }
         'ConditionalExpressionSyntax' { return "`$(if ($(Convert-Expression $e.Condition)) { $(Convert-Expression $e.WhenTrue) } else { $(Convert-Expression $e.WhenFalse) })" }
         'CastExpressionSyntax' {
             $target = $script:Model.GetTypeInfo($e.Type).Type
             $source = Get-ExprType $e.Expression
             $x = Convert-Expression $e.Expression
-            if ((Test-Integral $target) -and (Test-Floating $source)) { return "[$(Get-PsTypeName $target)][Math]::Truncate($x)" }   # C# truncates; PowerShell rounds
+            if ((Test-Integral $target) -and (Test-Integral $source)) { return "(Convert-CS2PSInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
+            if ((Test-Integral $target) -and (Test-Floating $source)) { return "(Convert-CS2PSFloatingInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
             return "[$(Get-PsTypeName $target)]$x"
         }
         'BinaryExpressionSyntax' { return (Convert-Binary $e) }
+        'CheckedExpressionSyntax' { return Convert-Expression $e.Expression }
         'DefaultExpressionSyntax' {
             $t = Get-ExprType $e
             if (Test-SourceStruct $t) { return "[$(Get-PsTypeName $t)]::new()" }
@@ -509,6 +588,9 @@ function Convert-Binary($e) {
     $lt = Get-ExprType $e.Left; $rt = Get-ExprType $e.Right
     $op = $e.OperatorToken.Text
     $strings = (Test-String $lt) -or (Test-String $rt)
+    if ($op -in '+','-','*','/','%' -and (Test-Integral (Get-ExprType $e))) {
+        return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))"
+    }
     switch ($op) {
         '+' { if ($strings) { return "[string]::Concat($l, $r)" }; return "$l + $r" }   # C# concatenation, never numeric addition
         '/' {
@@ -527,4 +609,15 @@ function Convert-Binary($e) {
         '<<' { return "$l -shl $r" } '>>' { return "$l -shr $r" }
         default { Add-Diagnostic $e "operator $op is not supported yet"; return "<# cs2ps: operator $op #>" }
     }
+}
+
+function Convert-Increment($e, [bool] $postfix) {
+    $type = Get-ExprType $e.Operand
+    if (-not (Test-Integral $type)) { Add-Diagnostic $e 'increment requires an integral local, parameter or simple field'; return '$null' }
+    if ($e.Operand -is [Microsoft.CodeAnalysis.CSharp.Syntax.ElementAccessExpressionSyntax] -or @($e.Operand.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax] }).Count) { Add-Diagnostic $e 'increment with effectful lvalue'; return '$null' }
+    $left = Convert-Expression $e.Operand
+    $old = "`$old$($e.Span.Start)"
+    $op = if ($e.OperatorToken.Text -eq '++') { '+' } else { '-' }
+    $value = if ($postfix) { $old } else { $left }
+    return "`$($old = $left; $left = (Invoke-CS2PSInteger ($old) 1 '$op' '$(Get-PsTypeName $type)' $(Get-CheckedFlag $e)); $value)"
 }
