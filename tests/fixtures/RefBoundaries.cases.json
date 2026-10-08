@@ -1,0 +1,11 @@
+[
+ {"Type":"RefBoundaries","Method":"Change","Arguments":[5,0]},
+ {"Type":"RefBoundaries","Method":"Change","Arguments":[-5,0]},
+ {"Type":"RefBoundaries","Method":"Wrapper","Arguments":[5]},
+ {"Type":"RefBoundaries","Method":"Forward","Arguments":[4]},
+ {"Type":"RefBoundaries","Method":"Parse","Arguments":["42"]},
+ {"Type":"RefBoundaries","Method":"Parse","Arguments":["bad"]},
+ {"Type":"RefBoundaries","Method":"Parse","Arguments":[null]},
+ {"Type":"RefBoundaries","Method":"Declaration","Arguments":["17"]},
+ {"Type":"RefBoundaries","Method":"Declaration","Arguments":["bad"]}
+]

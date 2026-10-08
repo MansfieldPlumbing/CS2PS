@@ -75,6 +75,7 @@ foreach ($file in $fixtures) {
         for ($i = 0; $i -lt $parameters.Count; $i++) {
             $argsCS[$i] = Convert-InputValue $case.Arguments[$i] $parameters[$i].ParameterType
             $splat[$mapping[0].Parameters[$i]] = Convert-InputValue $case.Arguments[$i] $parameters[$i].ParameterType
+            if ($parameters[$i].ParameterType.IsByRef) { $splat[$mapping[0].Parameters[$i]] = [System.Management.Automation.PSReference]::new($splat[$mapping[0].Parameters[$i]]) }
         }
         $expected = $null; $actual = $null; $csError = $null; $psError = $null
         $writerCS = [IO.StringWriter]::new(); $writerPS = [IO.StringWriter]::new()
@@ -86,6 +87,9 @@ foreach ($file in $fixtures) {
             try { $actual = & $mapping[0].Function @splat } catch { $psError = Get-RootException $_.Exception }
         } finally { [Console]::SetOut($originalOut) }
         $same = (Test-SameValue $expected $actual) -and $csError -ceq $psError -and $writerCS.ToString() -ceq $writerPS.ToString()
+        for ($i = 0; $i -lt $parameters.Count; $i++) {
+            if ($parameters[$i].ParameterType.IsByRef -and -not (Test-SameValue $argsCS[$i] $splat[$mapping[0].Parameters[$i]].Value)) { $same = $false }
+        }
         $writerCS.Dispose(); $writerPS.Dispose()
         $calls++; $fixtureCalls++
         if (-not $same) {

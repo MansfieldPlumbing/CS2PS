@@ -62,6 +62,7 @@ the license. Supplemental fixtures cover boundary behavior.
 | Simple class fields and methods | Case-insensitive members and function dispatch differ | Symbol-named fields, constructor factories and explicit receiver functions |
 | Class assignment | Objects must retain shared identity | Preserve the same object reference; null receivers throw |
 | Simple struct assignment, parameters and returns | PowerShell classes have reference semantics | Explicit copies at value boundaries; nested value fields copy, reference fields remain shared |
+| `out`/`ref` locals and parameters | Ordinary function arguments copy their values | `[ref]` cells and `.Value` accesses; aliases and forwarding retain the same storage |
 
 ## Supported now
 
