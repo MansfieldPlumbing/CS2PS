@@ -1,0 +1,231 @@
+#requires -Version 7.4
+<#
+.SYNOPSIS
+    Translates C# static methods into typed, idiomatic PowerShell functions.
+.DESCRIPTION
+    Parses C# with Roslyn from the running PowerShell's own $PSHOME and uses its
+    semantic model so C#'s meaning is carried across explicitly: integer
+    division truncates, string equality is case-sensitive, string
+    concatenation stays concatenation, narrowing casts truncate. Static methods
+    become advanced functions with typed parameters and [OutputType]; method
+    names map to approved verbs. Constructs outside the supported subset are
+    reported as diagnostics and marked in the output, never guessed.
+
+    Supported in this first slice: static methods; parameters and locals of
+    simple types; if/else, for, foreach, while, return, blocks; assignment and
+    compound assignment; ++/--; arithmetic, comparison, logical and
+    conditional expressions; casts; calls to static .NET members and to
+    instance members of values.
+.OUTPUTS
+    An object with the generated PowerShell text and its diagnostics.
+#>
+function ConvertFrom-CSharp {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'Path')] [string] $Path,
+        [Parameter(Mandatory, ParameterSetName = 'Source')] [string] $Source
+    )
+    Initialize-Roslyn
+    if ($Path) { $Source = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path).Path) }
+
+    $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source)
+    $refs = [System.Collections.Generic.List[Microsoft.CodeAnalysis.MetadataReference]]::new()
+    $runtimeDir = [IO.Path]::GetDirectoryName([object].Assembly.Location)
+    foreach ($n in 'System.Private.CoreLib.dll', 'System.Runtime.dll') {
+        $refs.Add([Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile([IO.Path]::Combine($runtimeDir, $n)))
+    }
+    $options = [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::DynamicallyLinkedLibrary)
+    $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create('cs2ps', [Microsoft.CodeAnalysis.SyntaxTree[]]@($tree), $refs, $options)
+    $script:Model = $compilation.GetSemanticModel($tree)
+    $script:Diagnostics = [System.Collections.Generic.List[object]]::new()
+
+    $errors = @($compilation.GetDiagnostics() | Where-Object { $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error })
+    if ($errors.Count) { throw "C# source does not compile: $($errors[0])" }
+
+    $out = [System.Text.StringBuilder]::new()
+    foreach ($type in $tree.GetRoot().DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] }) {
+        foreach ($m in $type.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] }) {
+            if (-not ($m.Modifiers | Where-Object { $_.Text -eq 'static' })) { Add-Diagnostic $m "instance method $($type.Identifier.Text).$($m.Identifier.Text) is not supported yet"; continue }
+            [void]$out.AppendLine((Convert-Method $type $m)).AppendLine()
+        }
+    }
+    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray() }
+}
+
+function Initialize-Roslyn {
+    if ('Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree' -as [type]) { return }
+    foreach ($n in 'Microsoft.CodeAnalysis.dll', 'Microsoft.CodeAnalysis.CSharp.dll') {
+        Add-Type -LiteralPath ([IO.Path]::Combine($PSHOME, $n))   # load from path; nothing is compiled
+    }
+}
+
+function Add-Diagnostic($node, [string] $message) {
+    $line = $node.GetLocation().GetLineSpan().StartLinePosition.Line + 1
+    $script:Diagnostics.Add([pscustomobject]@{ Line = $line; Message = $message })
+}
+
+function Get-PsTypeName($typeSymbol) {
+    switch ($typeSymbol.SpecialType.ToString()) {
+        'System_Int32' { return 'int' } 'System_Int64' { return 'long' } 'System_Double' { return 'double' }
+        'System_Single' { return 'float' } 'System_Boolean' { return 'bool' } 'System_String' { return 'string' }
+        'System_Char' { return 'char' } 'System_Byte' { return 'byte' } 'System_Int16' { return 'short' }
+        'System_UInt32' { return 'uint' } 'System_UInt64' { return 'ulong' } 'System_Decimal' { return 'decimal' }
+        'System_Void' { return $null }
+    }
+    $typeSymbol.ToDisplayString()
+}
+
+function Test-Integral($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Int32', 'System_Int64', 'System_Int16', 'System_Byte', 'System_UInt32', 'System_UInt64', 'System_SByte', 'System_UInt16' }
+function Test-Floating($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -in 'System_Double', 'System_Single', 'System_Decimal' }
+function Test-String($typeSymbol) { $typeSymbol -and $typeSymbol.SpecialType.ToString() -eq 'System_String' }
+function Get-ExprType($expr) { $script:Model.GetTypeInfo($expr).Type }
+
+# Method names map to approved verbs; the rest become Get- (value) or Invoke- (void).
+function Get-FunctionName([string] $class, [string] $method, [bool] $returnsValue) {
+    $map = [ordered]@{ Get = 'Get'; Set = 'Set'; Is = 'Test'; Has = 'Test'; Can = 'Test'; Compute = 'Measure'; Calculate = 'Measure'
+        Format = 'Format'; Parse = 'ConvertFrom'; Convert = 'Convert'; Clear = 'Clear'; Add = 'Add'; Remove = 'Remove'; Find = 'Find'; Reset = 'Reset'; New = 'New'; Create = 'New' }
+    foreach ($k in $map.Keys) {
+        if ($method -cmatch "^$k(?=[A-Z])") { return '{0}-{1}{2}' -f $map[$k], $class, $method.Substring($k.Length) }
+    }
+    '{0}-{1}{2}' -f ($(if ($returnsValue) { 'Get' } else { 'Invoke' })), $class, $method
+}
+
+function Convert-Method($type, $m) {
+    $symbol = $script:Model.GetDeclaredSymbol($m)
+    $returnType = Get-PsTypeName $symbol.ReturnType
+    $name = Get-FunctionName $type.Identifier.Text $m.Identifier.Text ([bool]$returnType)
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine("function $name {")
+    [void]$sb.AppendLine('    [CmdletBinding()]')
+    if ($returnType) { [void]$sb.AppendLine("    [OutputType([$returnType])]") }
+    $params = foreach ($p in $symbol.Parameters) { "        [Parameter(Mandatory)] [$(Get-PsTypeName $p.Type)] `$$($p.Name)" }
+    [void]$sb.AppendLine('    param(')
+    if ($params) { [void]$sb.AppendLine(($params -join ",`n")) }
+    [void]$sb.AppendLine('    )')
+    $line = $m.GetLocation().GetLineSpan().StartLinePosition.Line + 1
+    [void]$sb.AppendLine("    # From C# $($type.Identifier.Text).$($m.Identifier.Text) (line $line).")
+    if ($m.Body) { foreach ($s in $m.Body.Statements) { [void]$sb.Append((Convert-Statement $s 1)) } }
+    elseif ($m.ExpressionBody) { [void]$sb.AppendLine("    return $(Convert-Expression $m.ExpressionBody.Expression)") }
+    [void]$sb.Append('}')
+    $sb.ToString()
+}
+
+function Convert-Statement($s, [int] $depth) {
+    $pad = '    ' * $depth
+    switch ($s.GetType().Name) {
+        'LocalDeclarationStatementSyntax' {
+            $lines = foreach ($v in $s.Declaration.Variables) {
+                $t = Get-PsTypeName ($script:Model.GetDeclaredSymbol($v).Type)
+                $init = if ($v.Initializer) { ' = ' + (Convert-Expression $v.Initializer.Value) } else { '' }
+                "$pad[$t] `$$($v.Identifier.Text)$init`n"
+            }
+            return ($lines -join '')
+        }
+        'ExpressionStatementSyntax' { return "$pad$(Convert-Expression $s.Expression)`n" }
+        'ReturnStatementSyntax' { return $(if ($s.Expression) { "${pad}return $(Convert-Expression $s.Expression)`n" } else { "${pad}return`n" }) }
+        'BlockSyntax' { return (($s.Statements | ForEach-Object { Convert-Statement $_ $depth }) -join '') }
+        'IfStatementSyntax' {
+            $text = "${pad}if ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}"
+            $else = $s.Else
+            while ($else) {
+                if ($else.Statement -is [Microsoft.CodeAnalysis.CSharp.Syntax.IfStatementSyntax]) {
+                    $text += " elseif ($(Convert-Expression $else.Statement.Condition)) {`n$(Convert-Embedded $else.Statement.Statement ($depth + 1))$pad}"
+                    $else = $else.Statement.Else
+                } else { $text += " else {`n$(Convert-Embedded $else.Statement ($depth + 1))$pad}"; $else = $null }
+            }
+            return "$text`n"
+        }
+        'ForStatementSyntax' {
+            $init = if ($s.Declaration) { ($s.Declaration.Variables | ForEach-Object { "[$(Get-PsTypeName ($script:Model.GetDeclaredSymbol($_).Type))] `$$($_.Identifier.Text) = $(Convert-Expression $_.Initializer.Value)" }) -join '; ' } else { ($s.Initializers | ForEach-Object { Convert-Expression $_ }) -join '; ' }
+            $cond = if ($s.Condition) { Convert-Expression $s.Condition } else { '$true' }
+            $inc = ($s.Incrementors | ForEach-Object { Convert-Expression $_ }) -join '; '
+            return "${pad}for ($init; $cond; $inc) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n"
+        }
+        'ForEachStatementSyntax' { return "${pad}foreach (`$$($s.Identifier.Text) in $(Convert-Expression $s.Expression)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n" }
+        'WhileStatementSyntax' { return "${pad}while ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n" }
+        'BreakStatementSyntax' { return "${pad}break`n" }
+        'ContinueStatementSyntax' { return "${pad}continue`n" }
+        default { Add-Diagnostic $s "statement $($s.GetType().Name) is not supported yet"; return "$pad# cs2ps: unsupported statement: $($s.ToString().Trim() -replace '\s+', ' ')`n" }
+    }
+}
+
+function Convert-Embedded($s, [int] $depth) {
+    if ($s -is [Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax]) { return (($s.Statements | ForEach-Object { Convert-Statement $_ $depth }) -join '') }
+    Convert-Statement $s $depth
+}
+
+function Convert-Expression($e) {
+    switch ($e.GetType().Name) {
+        'LiteralExpressionSyntax' {
+            $v = $e.Token.Value
+            if ($v -is [string]) { return "'" + ($v -replace "'", "''") + "'" }
+            if ($v -is [bool]) { return $(if ($v) { '$true' } else { '$false' }) }
+            if ($null -eq $v) { return '$null' }
+            if ($v -is [char]) { return "[char]'$v'" }
+            return $e.Token.Text -replace '[fFdDmM]$', ''
+        }
+        'IdentifierNameSyntax' {
+            $sym = $script:Model.GetSymbolInfo($e).Symbol
+            if ($sym -and $sym.Kind.ToString() -in 'Local', 'Parameter') { return "`$$($e.Identifier.Text)" }
+            return "[$($sym.ToDisplayString())]"
+        }
+        'ParenthesizedExpressionSyntax' { return "($(Convert-Expression $e.Expression))" }
+        'PrefixUnaryExpressionSyntax' {
+            $op = $e.OperatorToken.Text
+            $x = Convert-Expression $e.Operand
+            switch ($op) { '!' { return "-not $x" } '-' { return "-$x" } '++' { return "++$x" } '--' { return "--$x" } default { Add-Diagnostic $e "prefix $op"; return "$op$x" } }
+        }
+        'PostfixUnaryExpressionSyntax' { return "$(Convert-Expression $e.Operand)$($e.OperatorToken.Text)" }
+        'AssignmentExpressionSyntax' { return "$(Convert-Expression $e.Left) $($e.OperatorToken.Text) $(Convert-Expression $e.Right)" }
+        'ConditionalExpressionSyntax' { return "`$(if ($(Convert-Expression $e.Condition)) { $(Convert-Expression $e.WhenTrue) } else { $(Convert-Expression $e.WhenFalse) })" }
+        'CastExpressionSyntax' {
+            $target = $script:Model.GetTypeInfo($e.Type).Type
+            $source = Get-ExprType $e.Expression
+            $x = Convert-Expression $e.Expression
+            if ((Test-Integral $target) -and (Test-Floating $source)) { return "[$(Get-PsTypeName $target)][Math]::Truncate($x)" }   # C# truncates; PowerShell rounds
+            return "[$(Get-PsTypeName $target)]$x"
+        }
+        'BinaryExpressionSyntax' { return (Convert-Binary $e) }
+        'InvocationExpressionSyntax' {
+            $args_ = ($e.ArgumentList.Arguments | ForEach-Object { Convert-Expression $_.Expression }) -join ', '
+            $sym = $script:Model.GetSymbolInfo($e).Symbol
+            if ($e.Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax]) {
+                if ($sym -and $sym.IsStatic) { return "[$($sym.ContainingType.ToDisplayString())]::$($sym.Name)($args_)" }
+                return "$(Convert-Expression $e.Expression.Expression).$($e.Expression.Name.Identifier.Text)($args_)"
+            }
+            Add-Diagnostic $e "call to $($e.Expression) is not supported yet"; return "# cs2ps: unsupported call $e"
+        }
+        'MemberAccessExpressionSyntax' {
+            $sym = $script:Model.GetSymbolInfo($e).Symbol
+            if ($sym -and $sym.IsStatic) { return "[$($sym.ContainingType.ToDisplayString())]::$($sym.Name)" }
+            return "$(Convert-Expression $e.Expression).$($e.Name.Identifier.Text)"
+        }
+        default { Add-Diagnostic $e "expression $($e.GetType().Name) is not supported yet"; return "<# cs2ps: unsupported $($e.GetType().Name) #>" }
+    }
+}
+
+function Convert-Binary($e) {
+    $l = Convert-Expression $e.Left; $r = Convert-Expression $e.Right
+    $lt = Get-ExprType $e.Left; $rt = Get-ExprType $e.Right
+    $op = $e.OperatorToken.Text
+    $strings = (Test-String $lt) -or (Test-String $rt)
+    switch ($op) {
+        '+' { if ($strings) { return "[string]::Concat($l, $r)" }; return "$l + $r" }   # C# concatenation, never numeric addition
+        '/' {
+            if ((Test-Integral $lt) -and (Test-Integral $rt)) { return "[Math]::DivRem($l, $r).Item1" }   # C# truncates toward zero; PowerShell would return a double
+            return "$l / $r"
+        }
+        '-' { return "$l - $r" } '*' { return "$l * $r" } '%' { return "$l % $r" }
+        '==' { return $(if ($strings) { "$l -ceq $r" } else { "$l -eq $r" }) }
+        '!=' { return $(if ($strings) { "$l -cne $r" } else { "$l -ne $r" }) }
+        '<' { return $(if ($strings) { "$l -clt $r" } else { "$l -lt $r" }) }
+        '>' { return $(if ($strings) { "$l -cgt $r" } else { "$l -gt $r" }) }
+        '<=' { return $(if ($strings) { "$l -cle $r" } else { "$l -le $r" }) }
+        '>=' { return $(if ($strings) { "$l -cge $r" } else { "$l -ge $r" }) }
+        '&&' { return "$l -and $r" } '||' { return "$l -or $r" }
+        '&' { return "$l -band $r" } '|' { return "$l -bor $r" } '^' { return "$l -bxor $r" }
+        '<<' { return "$l -shl $r" } '>>' { return "$l -shr $r" }
+        default { Add-Diagnostic $e "operator $op is not supported yet"; return "<# cs2ps: operator $op #>" }
+    }
+}
