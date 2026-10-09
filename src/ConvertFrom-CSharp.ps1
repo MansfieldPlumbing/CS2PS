@@ -283,7 +283,7 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
         }
     }
     # Fail closed: a diagnostic never leaves a partially translated program executable.
-    if ($script:Diagnostics.Count) {
+    if (@($script:Diagnostics | Where-Object Severity -NE 'Information').Count) {
         $out.Clear() | Out-Null
         foreach ($d in $script:Diagnostics) { [void]$out.AppendLine("# CS2PS: unsupported at line $($d.Line): $($d.Message)") }
         [void]$out.AppendLine("throw [NotSupportedException]::new('CS2PS translation has diagnostics.')")
@@ -303,10 +303,10 @@ function Initialize-Roslyn {
     }
 }
 
-function Add-Diagnostic($node, [string] $message) {
+function Add-Diagnostic($node, [string] $message, [string] $severity = 'Error') {
     $location = if ($node -is [Microsoft.CodeAnalysis.Diagnostic]) { $node.Location } else { $node.GetLocation() }
     $line = $location.GetLineSpan().StartLinePosition.Line + 1
-    $script:Diagnostics.Add([pscustomobject]@{ Line = $line; Message = $message })
+    $script:Diagnostics.Add([pscustomobject]@{ Line = $line; Message = $message; Severity = $severity })
 }
 function Test-SupportedValueType($type) {
     if (Test-Nullable $type) {
@@ -470,6 +470,38 @@ function Get-CheckedFlag($node) {
         $node = $node.Parent
     }
     '$false'
+}
+
+function Convert-IntegerOperation($node, [string] $left, [string] $right, [string] $operator, $type) {
+    $name = Get-PsTypeName $type
+    if ($operator -eq '/' -and $name -in 'int','long') {
+        return "[Math]::DivRem([$name]($left), [$name]($right)).Item1 <# C# integer division truncates and preserves division exceptions. #>"
+    }
+    if ($operator -notin '+','-','*') {
+        return "(Invoke-CS2PSInteger ($left) ($right) '$operator' '$name' $(Get-CheckedFlag $node)) <# C# width, shift masks and exceptional remainder are explicit. #>"
+    }
+    $constant = $script:Model.GetConstantValue($node)
+    if ($constant.HasValue -and $node -is [Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax]) {
+        return Convert-NumericLiteral $constant.Value $type
+    }
+    $wide = if ($name -in 'int','short','byte','sbyte','ushort','char') { 'long' } else { 'Numerics.BigInteger' }
+    $method = if ((Get-CheckedFlag $node) -eq '$true') { 'CreateChecked' } else { 'CreateTruncating' }
+    $reason = if ($method -eq 'CreateChecked') { 'C# checked overflow must throw.' } else { "C# unchecked $name overflow must wrap; operands are not proven bounded." }
+    if ($method -eq 'CreateTruncating') { Add-Diagnostic $node $reason 'Information' }
+    if ($name -eq 'char') { return "[char][ushort]::$method[$wide](([$wide]($left) $operator [$wide]($right))) <# $reason #>" }
+    return "[$name]::$method[$wide](([$wide]($left) $operator [$wide]($right))) <# $reason #>"
+}
+function Convert-NumericLiteral($value, $type) {
+    $literal = $value.ToString([Globalization.CultureInfo]::InvariantCulture)
+    $name = Get-PsTypeName $type
+    if ($name -eq 'int') { return $literal }
+    if ($name -eq 'double') {
+        if ($literal -notmatch '[.Ee]') { $literal += '.0' }
+        return $literal
+    }
+    if ($name -eq 'long') { return $literal + 'L' }
+    if ($name -eq 'decimal') { return $literal + 'D' }
+    return "[$name]($literal)"
 }
 
 # Method names map to approved verbs; the rest become Get- (value) or Invoke- (void).
@@ -687,7 +719,7 @@ function Convert-Expression($e) {
             if ($v -is [char]) { return "[char]$([int]$v)" }
             $t = Get-ExprType $e
             $literal = $v.ToString([Globalization.CultureInfo]::InvariantCulture)
-            return "[$(Get-PsTypeName $t)]'$literal'"
+            return Convert-NumericLiteral $v $t
         }
         'InterpolatedStringExpressionSyntax' {
             $format = [Text.StringBuilder]::new(); $values = [System.Collections.Generic.List[string]]::new()
@@ -725,7 +757,7 @@ function Convert-Expression($e) {
             if ($op -in '++','--') { return Convert-Increment $e $false }
             if (Test-Nullable (Get-ExprType $e.Operand)) { return "(Invoke-CS2PSNullableUnary ($x) '$op' '$(Get-PsTypeName (Get-UnderlyingType (Get-ExprType $e)))' $(Get-CheckedFlag $e))" }
             if ($op -eq '~' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($x) 0 '~' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
-            if ($op -eq '-' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger 0 ($x) '-' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))" }
+            if ($op -eq '-' -and (Test-Integral (Get-ExprType $e))) { return Convert-IntegerOperation $e '0' $x '-' (Get-ExprType $e) }
             switch ($op) { '!' { return "-not ($x)" } '-' { return "-($x)" } '+' { return "($x)" } default { Add-Diagnostic $e "prefix $op"; return '$null' } }
         }
         'PostfixUnaryExpressionSyntax' { if ($e.OperatorToken.Text -eq '!') { return Convert-Expression $e.Operand }; return Convert-Increment $e $true }
@@ -747,7 +779,7 @@ function Convert-Expression($e) {
             }
             if ($op -ne '=' -and (Test-Integral (Get-ExprType $e.Left))) {
                 if (-not (Test-SimpleLValue $e.Left)) { Add-Diagnostic $e 'compound assignment with effectful receiver'; return '$null' }
-                return "$left = (Invoke-CS2PSInteger ($left) ($right) '$($op.TrimEnd('='))' '$(Get-PsTypeName (Get-ExprType $e.Left))' $(Get-CheckedFlag $e))"
+                return "$left = $(Convert-IntegerOperation $e $left $right $op.TrimEnd('=') (Get-ExprType $e.Left))"
             }
             if ($op -eq '+=' -and (Test-String (Get-ExprType $e.Left))) { return "$left = [string]::Concat($left, $right)" }
             return "$left $op $right"
@@ -768,7 +800,12 @@ function Convert-Expression($e) {
             }
             if ($source.SpecialType.ToString() -eq 'System_Char' -and (Test-Floating $target)) { return "[$(Get-PsTypeName $target)][int]($x)" }
             if ((Test-Integral $target) -and (Test-Integral $source)) { return "(Convert-CS2PSInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
-            if ((Test-Integral $target) -and (Test-Floating $source)) { return "(Convert-CS2PSFloatingInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
+            if ((Test-Integral $target) -and (Test-Floating $source)) {
+                if ((Get-PsTypeName $target) -in 'int','uint','long','ulong' -and (Get-PsTypeName $source) -in 'double','float' -and (Get-CheckedFlag $e) -eq '$false') {
+                    return "[$(Get-PsTypeName $target)]::CreateSaturating[$(Get-PsTypeName $source)]($x) <# C# floating conversion truncates and saturates on this runtime. #>"
+                }
+                return "(Convert-CS2PSFloatingInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))"
+            }
             return "[$(Get-PsTypeName $target)]$x"
         }
         'BinaryExpressionSyntax' { return (Convert-Binary $e) }
@@ -901,7 +938,7 @@ function Convert-Binary($e) {
     $strings = (Test-String $lt) -or (Test-String $rt)
     if ($op -in '==','!=' -and (($lt -and $lt.IsReferenceType) -or ($rt -and $rt.IsReferenceType))) {
         $operation = $script:Model.GetOperation($e, [Threading.CancellationToken]::None)
-        if ($operation.LeftOperand.Type.SpecialType.ToString() -eq 'System_String') { $test = "(Test-CS2PSConstant ($l) ($r))" }
+        if ($operation.LeftOperand.Type.SpecialType.ToString() -eq 'System_String') { $test = "[object]::Equals($l, $r) <# String.Equals is ordinal; object arguments preserve null versus empty. #>" }
         else { $test = "[object]::ReferenceEquals($l, $r)" }
         if ($op -eq '!=') { return "(-not ($test))" }; return "($test)"
     }
@@ -923,13 +960,23 @@ function Convert-Binary($e) {
     }
     if (($op -in '+','-','*','/','%','==','!=','<','>','<=','>=') -and ((Test-Floating $lt) -or (Test-Floating $rt))) {
         $operation = $script:Model.GetOperation($e, [Threading.CancellationToken]::None)
+        if ($operation.LeftOperand.Type.SpecialType.ToString() -eq 'System_Double') {
+            $operators = @{ '+'='+'; '-'='-'; '*'='*'; '/'='/'; '%'='%'; '=='='-eq'; '!='='-ne'; '<'='-lt'; '>'='-gt'; '<='='-le'; '>='='-ge' }
+            return "([double]($l) $($operators[$op]) [double]($r))"
+        }
         return "(Invoke-CS2PSNumber ($l) ($r) '$op' '$(Get-PsTypeName $operation.LeftOperand.Type)' $(Get-CheckedFlag $e))"
     }
-    if ($op -in '==','!=','<','>','<=','>=' -and (Test-Integral $lt) -and (Test-Integral $rt)) { return "(Compare-CS2PSInteger ($l) ($r) '$op')" }
+    if ($op -in '==','!=','<','>','<=','>=' -and (Test-Integral $lt) -and (Test-Integral $rt)) {
+        if ($lt.SpecialType -eq $rt.SpecialType -and (Get-PsTypeName $lt) -in 'int','long','uint','ulong') {
+            $operators = @{ '=='='-eq'; '!='='-ne'; '<'='-lt'; '>'='-gt'; '<='='-le'; '>='='-ge' }
+            return "($l $($operators[$op]) $r)"
+        }
+        return "(Compare-CS2PSInteger ($l) ($r) '$op')"
+    }
     if ($op -in '&','|','^' -and (Get-ExprType $e).SpecialType.ToString() -eq 'System_Boolean') { return "(Invoke-CS2PSBoolean ($l) ($r) '$op')" }
     if ($op -in '&','|','^','<<','>>','>>>' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
     if ($op -in '+','-','*','/','%' -and (Test-Integral (Get-ExprType $e))) {
-        return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))"
+        return Convert-IntegerOperation $e $l $r $op (Get-ExprType $e)
     }
     switch ($op) {
         '+' { if ($strings) { return "[string]::Concat($l, $r)" }; return "$l + $r" }   # C# concatenation, never numeric addition
@@ -961,6 +1008,6 @@ function Convert-Increment($e, [bool] $postfix) {
     $old = "`$old$($e.Span.Start)"
     $op = if ($e.OperatorToken.Text -eq '++') { '+' } else { '-' }
     $value = if ($postfix) { $old } else { $left }
-    $helper = if ($nullable) { 'Invoke-CS2PSNullableBinary' } else { 'Invoke-CS2PSInteger' }
-    return "`$($old = $left; $left = ($helper ($old) 1 '$op' '$(Get-PsTypeName $type)' $(Get-CheckedFlag $e)); $value)"
+    $operation = if ($nullable) { "(Invoke-CS2PSNullableBinary ($old) 1 '$op' '$(Get-PsTypeName $type)' $(Get-CheckedFlag $e))" } else { Convert-IntegerOperation $e $old '1' $op $type }
+    return "`$($old = $left; $left = $operation; $value)"
 }
