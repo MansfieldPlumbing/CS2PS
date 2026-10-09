@@ -80,8 +80,8 @@ foreach ($file in $fixtures) {
         if ($case.Instance) {
             $receiverCS = [Activator]::CreateInstance($type, $true)
             $typeMapping = @($result.Types | Where-Object { $_.Type -ceq $case.Type })
-            if ($typeMapping.Count -ne 1 -or -not $typeMapping[0].DefaultFactory) { throw 'Instance parity requires a default constructor' }
-            $splat.self = & $typeMapping[0].DefaultFactory
+            if ($typeMapping.Count -ne 1 -or -not $typeMapping[0].HasDefaultConstructor) { throw 'Instance parity requires a default constructor' }
+            $splat.self = [Activator]::CreateInstance(($typeMapping[0].PowerShellType -as [type]))
         }
         for ($i = 0; $i -lt $parameters.Count; $i++) {
             $argsCS[$i] = Convert-InputValue $case.Arguments[$i] $parameters[$i].ParameterType
@@ -95,7 +95,12 @@ foreach ($file in $fixtures) {
             [Console]::SetOut($writerCS)
             try { $expected = $method.Invoke($receiverCS, $argsCS) } catch { $csError = Get-RootException $_.Exception }
             [Console]::SetOut($writerPS)
-            try { $actual = & $mapping[0].Function @splat } catch { $psError = Get-RootException $_.Exception }
+            try {
+                if ($mapping[0].ClassMethod -and -not $mapping[0].IsStatic) {
+                    $argumentsPS = [object[]]@($mapping[0].Parameters | ForEach-Object { $splat[$_] })
+                    $actual = $splat.self.PSObject.Methods[$mapping[0].ClassMethod].Invoke($argumentsPS)
+                } else { $actual = & $mapping[0].Function @splat }
+            } catch { $psError = Get-RootException $_.Exception }
         } finally { [Console]::SetOut($originalOut) }
         $same = (Test-SameValue $expected $actual) -and $csError -ceq $psError -and $writerCS.ToString() -ceq $writerPS.ToString()
         for ($i = 0; $i -lt $parameters.Count; $i++) {
