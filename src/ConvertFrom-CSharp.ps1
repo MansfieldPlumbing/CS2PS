@@ -363,9 +363,52 @@ function Get-ReadableName($symbol, [string] $scope, [string] $name, [switch] $Va
 function Get-VariableName($symbol) {
     Get-ReadableName $symbol ('variables:' + $symbol.ContainingSymbol.ToString()) $symbol.Name -Variable
 }
-function Get-StorageType($symbol) {
-    if ((Test-String $symbol) -or (Test-Nullable $symbol)) { return 'object' } # Preserve null and boxed underlying values.
-    Get-PsTypeName $symbol
+function Test-NonNullStringExpression($expression) {
+    if (-not $expression) { return $false }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.LiteralExpressionSyntax]) { return $null -ne $expression.Token.Value }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.InterpolatedStringExpressionSyntax]) { return $true }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.BinaryExpressionSyntax] -and $expression.OperatorToken.Text -eq '+' -and (Test-String (Get-ExprType $expression))) { return $true }
+    return $false
+}
+function Test-NullObservable($symbol) {
+    if (-not $symbol -or $symbol.Kind.ToString() -eq 'Field') { return $true }
+    if ($symbol.NullableAnnotation.ToString() -eq 'Annotated') { return $true }
+    $declaration = $symbol.DeclaringSyntaxReferences[0].GetSyntax([Threading.CancellationToken]::None)
+    $scope = $declaration
+    while ($scope.Parent -and $scope -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax]) { $scope = $scope.Parent }
+    $references = @($scope.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax] -and $_.Identifier.ValueText -ceq $symbol.Name } | Where-Object {
+        $target = $script:Model.GetSymbolInfo($_).Symbol
+        $target -and $target.DeclaringSyntaxReferences.Length -and $target.DeclaringSyntaxReferences[0].Span.Start -eq $symbol.DeclaringSyntaxReferences[0].Span.Start
+    })
+    if ($symbol.Kind.ToString() -eq 'Local' -and $declaration.Initializer -and (Test-NonNullStringExpression $declaration.Initializer.Value)) {
+        $writes = @($references | Where-Object { $_.Parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.AssignmentExpressionSyntax] -and $_.Parent.Left -eq $_ })
+        if (-not @($writes | Where-Object { -not (Test-NonNullStringExpression $_.Parent.Right) }).Count) { return $false }
+    }
+    foreach ($reference in $references) {
+        $parent = $reference.Parent
+        if ($parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.BinaryExpressionSyntax] -and $parent.OperatorToken.Text -eq '+' -and (Test-String (Get-ExprType $parent))) { continue }
+        # Other uses may expose null identity, a null return or a null dereference.
+        return $true
+    }
+    return $false
+}
+function Get-StorageType($type, $owner = $null) {
+    if ((Test-Nullable $type) -or ((Test-String $type) -and (Test-NullObservable $owner))) { return 'object' }
+    Get-PsTypeName $type
+}
+function Test-ProvenNonNull($expression) {
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ThisExpressionSyntax] -or $expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ObjectCreationExpressionSyntax]) { return $true }
+    if ((Test-String (Get-ExprType $expression)) -and (Test-NonNullStringExpression $expression)) { return $true }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) {
+        $symbol = $script:Model.GetSymbolInfo($expression).Symbol
+        return (Test-String $symbol.Type) -and -not (Test-NullObservable $symbol)
+    }
+    return $false
+}
+function Convert-Receiver($expression) {
+    $text = Convert-Expression $expression
+    if (Test-ProvenNonNull $expression) { return $text }
+    return "(Get-CS2PSReceiver ($text) <# C# null dereferences throw NullReferenceException. #>)"
 }
 function Get-DefaultValue($type) {
     if (Test-SourceStruct $type) { return "[$(Get-PsTypeName $type)]::new()" }
@@ -416,7 +459,7 @@ function Convert-TypeDeclaration($node) {
             if (-not (Test-SupportedValueType $f.Type)) { Add-Diagnostic $v 'unsupported field type' }
             $static = if ($f.IsStatic) { 'static ' } else { '' }
             $default = if (Test-SourceStruct $f.Type) { " = [$(Get-PsTypeName $f.Type)]::new()" } else { '' }
-            $text += "    $static[$(Get-StorageType $f.Type)] `$$(Get-FieldName $f)$default`n"
+            $text += "    $static[$(Get-StorageType $f.Type $f)] `$$(Get-FieldName $f)$default`n"
             if ($f.IsStatic -and $v.Initializer) { Add-Diagnostic $v 'static field initializer' }
         }
     }
@@ -441,7 +484,7 @@ function Convert-TypeDeclaration($node) {
     foreach ($ctor in $symbol.InstanceConstructors) {
         foreach ($p in $ctor.Parameters) { if ($p.RefKind.ToString() -ne 'None' -or $p.IsParams -or $p.HasExplicitDefaultValue -or -not (Test-SupportedValueType $p.Type)) { Add-Diagnostic $node 'unsupported constructor parameter' } }
         $name = Get-ConstructorFunction $ctor
-        $parameters = @($ctor.Parameters | ForEach-Object { "[$(Get-StorageType $_.Type)] `$$(Get-VariableName $_)" })
+        $parameters = @($ctor.Parameters | ForEach-Object { "[$(Get-StorageType $_.Type $_)] `$$(Get-VariableName $_)" })
         $text += "function $name {`n    param($($parameters -join ', '))`n    `$self = [$typeName]::new()`n"
         foreach ($field in $fields) {
             foreach ($v in $field.Declaration.Variables) {
@@ -528,9 +571,12 @@ function Convert-Method($type, $m) {
     if ($returnType) { [void]$sb.AppendLine("    [OutputType([$returnType])]") }
     $params = foreach ($p in $symbol.Parameters) {
         if (-not (Test-SupportedValueType $p.Type) -or $p.IsParams -or $p.HasExplicitDefaultValue) { Add-Diagnostic $m 'unsupported parameter type, params or optional parameter' }
-        $t = if ($p.RefKind.ToString() -in 'Ref','Out') { 'ref' } else { Get-StorageType $p.Type }
+        $t = if ($p.RefKind.ToString() -in 'Ref','Out') { 'ref' } else { Get-StorageType $p.Type $p }
         if ($p.RefKind.ToString() -notin 'None','Ref','Out') { Add-Diagnostic $m 'in/ref-readonly parameters' }
-        "        [AllowNull()] [AllowEmptyString()] [AllowEmptyCollection()] [$t] `$$(Get-VariableName $p)"
+        # Parameters are optional: the binder already admits null/empty values.
+        $attributes = ''
+        $note = if ((Test-String $p.Type) -and $t -eq 'object') { ' <# Null and empty are observably distinct for this parameter. #>' } else { '' }
+        "        $attributes[$t] `$$(Get-VariableName $p)$note"
     }
     if (-not $symbol.IsStatic) { $params = @('        [object] $self') + @($params) }
     [void]$sb.AppendLine('    param(')
@@ -554,7 +600,8 @@ function Convert-Statement($s, [int] $depth) {
         'LocalDeclarationStatementSyntax' {
             if ($s.UsingKeyword.Text -or $s.AwaitKeyword.Text) { Add-Diagnostic $s 'using/await-using declaration' }
             $lines = foreach ($v in $s.Declaration.Variables) {
-                $t = Get-StorageType ($script:Model.GetDeclaredSymbol($v).Type)
+                $owner = $script:Model.GetDeclaredSymbol($v)
+                $t = Get-StorageType $owner.Type $owner
                 if (-not (Test-SupportedValueType ($script:Model.GetDeclaredSymbol($v).Type))) { Add-Diagnostic $v 'unsupported local type' }
                 $init = if ($v.Initializer) { ' = ' + (Convert-Value $v.Initializer.Value) } else { ' = ' + (Get-DefaultValue ($script:Model.GetDeclaredSymbol($v).Type)) }
                 "$pad[$t] `$$(Get-VariableName ($script:Model.GetDeclaredSymbol($v)))$init`n"
@@ -922,7 +969,7 @@ function Convert-Expression($e) {
                         if ($e.ArgumentList.Arguments[$i].Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.LiteralExpressionSyntax] -and (Get-ExprType $e.ArgumentList.Arguments[$i].Expression).SpecialType -eq $sym.Parameters[$i].Type.SpecialType) { $values[$i] }
                         else { "[$(Get-PsTypeName $sym.Parameters[$i].Type)]($($values[$i]))" }
                     }
-                    $target = if ($sym.IsStatic) { "[$(Get-PsTypeName $sym.ContainingType)]::" } else { "(Get-CS2PSReceiver ($receiver))." }
+                    $target = if ($sym.IsStatic) { "[$(Get-PsTypeName $sym.ContainingType)]::" } else { "$(Convert-Receiver $e.Expression.Expression)." }
                     return "$target$($sym.Name)($($typedValues -join ', '))"
                 }
                 return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static) <# Reflection preserves the selected object/null, ref or expanded params signature. #>"
@@ -939,10 +986,10 @@ function Convert-Expression($e) {
             }
             if ($sym.Kind.ToString() -eq 'Field' -and (Test-SourceType $sym.ContainingType)) {
                 if ($sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$((Get-FieldName $sym))" }
-                return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression))).$(Get-FieldName $sym)"
+                return "$(Convert-Receiver $e.Expression).$(Get-FieldName $sym)"
             }
             if ($sym -and $sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$($sym.Name)" }
-            return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression))).$($e.Name.Identifier.Text)"
+            return "$(Convert-Receiver $e.Expression).$($e.Name.Identifier.Text)"
         }
         default { Add-Diagnostic $e "expression $($e.GetType().Name) is not supported yet"; return "<# CS2PS: unsupported $($e.GetType().Name) #>" }
     }
