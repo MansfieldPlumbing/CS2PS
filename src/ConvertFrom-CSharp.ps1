@@ -320,7 +320,7 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
         $default = @($symbol.InstanceConstructors | Where-Object { $_.Parameters.Length -eq 0 })
         [pscustomobject]@{ Type = $symbol.ToString(); PowerShellType = Get-PsTypeName $symbol; HasDefaultConstructor = $default.Count -gt 0 }
     }
-    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings); Renames = $script:Renames.ToArray(); ApiCalls = $script:ApiCalls.ToArray() }
+    [pscustomobject]@{ PowerShell = $out.ToString().Replace("`r`n","`n").TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings); Renames = $script:Renames.ToArray(); ApiCalls = $script:ApiCalls.ToArray() }
 }
 
 function Initialize-Roslyn {
