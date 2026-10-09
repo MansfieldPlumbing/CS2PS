@@ -63,7 +63,7 @@ function Get-CS2PSInvocationCorrespondence($Method, $Expression, [string[]] $Val
     $casts = 0
     if (-not $reasons.Count) {
         for ($i=0; $i -lt $Values.Count; $i++) {
-            $source = $Expression.ArgumentList.Arguments[$i].Expression
+            $source = if ($i -lt $Expression.ArgumentList.Arguments.Count) { $Expression.ArgumentList.Arguments[$i].Expression } else { $null }
             $parameter = $Method.Parameters[$i]
             if ($parameter.Type.SpecialType.ToString() -eq 'System_String' -and -not (Test-ProvenNonNull $source)) {
                 $reasons.Add('A string cast would collapse observable null to empty; an untyped null cannot constrain this overload.')
@@ -99,11 +99,19 @@ function Get-CS2PSInvocationCorrespondence($Method, $Expression, [string[]] $Val
             }
         }
     }
+    $expectedTrace = $null
+    if ($selected) {
+        $adapter = [System.Management.Automation.PSObject].Assembly.GetType('System.Management.Automation.DotNetAdapter')
+        $formatter = $adapter.GetMethod('GetMethodInfoOverloadDefinition',[Reflection.BindingFlags]'Static,NonPublic')
+        if ($formatter) { $expectedTrace = $formatter.Invoke($null,[object[]]@($selected.Name,$selected.PSObject.BaseObject,0)) }
+    }
     [pscustomobject]@{
         Outcome = if ($reasons.Count) { 'Exact fallback' } elseif ($casts) { 'Adapted' } else { 'Direct' }
         Rule = if ($reasons.Count) { 'ExactSignatureInvocation' } else { 'ExactTypedArguments' }
         Reasons = @($reasons); Ast = $callAst; Casts = $casts
         SelectedSignature = if ($selected) { $selected.ToString() } else { $Method.ToString() }
+        Proof = 'Signature availability and SMA argument constraints; runtime overload selection is not universally proved.'
+        ExpectedTrace = $expectedTrace
         Evidence = 'https://github.com/PowerShell/PowerShell/blob/149ab5cd6cad34869177f86ef9a3da8414f85dc6/src/System.Management.Automation/engine/parser/Compiler.cs#L1033'
     }
 }

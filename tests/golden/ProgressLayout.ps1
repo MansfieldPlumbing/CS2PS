@@ -8,14 +8,14 @@ class ProgressLayout {
         }
         return [Math]::DivRem([int]([int]::CreateTruncating[long](([long]($columns) * [long]($percent))) <# C# unchecked int overflow must wrap; operands are not proven bounded. #>), [int](100)).Item1 <# C# integer division truncates and preserves division exceptions. #>
     }
-    static [object] FormatLabel([string] $activity, [int] $percent) {
+    static [string] FormatLabel([string] $activity, [int] $percent) {
         [string] $text = [string]::Concat([string]::Concat([string]::Concat($activity, ': '), $percent), '%')
         if (($text.Length -gt 20)) {
             $text = [string]::Concat($text.Substring(0, 17), '...')
         }
         return $text
     }
-    static [bool] IsSame([object] $a, [object] $b) {
+    static [bool] IsSame([object] $a <# Preserve C# null versus empty. #>, [object] $b <# Preserve C# null versus empty. #>) {
         return ([object]::Equals($a, $b) <# String.Equals is ordinal; object arguments preserve null versus empty. #>)
     }
     static [int] SumTo([int] $n) {
@@ -32,7 +32,13 @@ class ProgressLayout {
         return [int]::CreateSaturating[double]((([double]((([double]($a) + [double]($b)))) / [double](2)))) <# C# floating conversion truncates and saturates on this runtime. #>
     }
     static [int] Clamp([int] $value, [int] $low, [int] $high) {
-        return $(if (($value -lt $low)) { $low } else { ($(if (($value -gt $high)) { $high } else { $value })) })
+        if (($value -lt $low)) {
+            return $low
+        }
+        if (($value -gt $high)) {
+            return $high
+        }
+        return $value
     }
 }
 

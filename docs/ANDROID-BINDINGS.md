@@ -25,7 +25,7 @@ licenses have SHA-256 integrity records. The mirror's checkout is never changed.
 | JavaNativeTypeManager.cs and .ps1 | Three extracted upstream naming methods and their generated PowerShell |
 | JavaNativeTypeManager.cases.json | Independent comparison inputs for those original method bodies |
 | receipt.json | Counts, parity and lowering results with scope and runtime identity |
-| JavaNativeTypeManager.lowered.dll | Admitted naming-policy method emitted as an independent managed assembly and compared to the original |
+| receipt.json Lowered.Path | Deterministic independent managed assembly containing all three admitted naming methods |
 
 The API XML is a generator input, not generated C# implementation. TTS resides
 there even though this source revision has no hand-written TextToSpeech.cs.
@@ -79,15 +79,16 @@ the extracted logic on the host, not the complete upstream class or assembly.
 The namespace wrapper is normalized for the comparison host; method bodies remain
 unchanged. No C# is compiled for product implementation.
 
-Pinned PSLowering admits IsPackageNamePreservedForAssembly and rejects the other
-two because generated null/bounds guards are PowerShell command calls. Those
-rejections remain recorded; PSLowering is unchanged. No device execution occurred.
-The admitted method is also exported and invoked against the original comparison
-assembly, rather than stopping at admission. Its result and dependency receipt
-remain separate from SMA parity.
-The measured output is 2,048 bytes with System.Private.CoreLib as its only assembly
-reference, and five lowered comparisons per culture with zero differences. This is
-one naming-policy method, not the footprint of an Android runtime or application.
+After the typed-output improvements described in docs/OUTPUT-CONTRACT.md, pinned
+PSLowering admits all three naming methods. Direct CLR string indexing and a
+control/data-flow-checked first-dereference guard remove their semantic helper
+calls. Null-preserving parameter/return storage remains where required.
+The three methods are exported twice, compared byte-for-byte, checked for managed
+references and invoked independently against the original comparison assembly,
+including null returns and exceptions. There are 25 lowered comparisons per culture
+with zero differences, and CoreLib is the only assembly reference. This is managed
+naming logic, not the footprint of an Android runtime or application. PSLowering
+and QuickPS are unchanged. No device execution occurred.
 
 ## Consumer order and remaining boundaries
 
@@ -125,7 +126,9 @@ The diagnostic suite retains its original 15 cases and adds a dynamic-invocation
 case. The conditional-profile fixture also compares a nameof result.
 
 Run `-Mode CallMatrix` alongside this mode to preserve the existing gate. That
-suite has 285 comparisons per culture; this batch adds 25 upstream helper cases
-and two conditional/nameof cases, giving 312 SMA comparisons per culture in total,
-plus the five independent lowered comparisons. The existing four exact goldens
-and 17 upstream fixture integrity checks still pass.
+suite now has 302 comparisons per culture, including 17 new null/index/evaluation
+regressions. This batch adds 25 upstream helper cases and two conditional/nameof
+cases, giving 329 SMA comparisons per culture. SourceClosure adds another 12
+original Android method-body cases, for 341 total. Independent IL comparisons
+remain a separate gate. The four exact goldens and 17 upstream fixture integrity
+checks are retained.

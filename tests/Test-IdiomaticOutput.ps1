@@ -1,7 +1,7 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix','AndroidBindings')] [string] $Mode = 'Verify',
+    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix','AndroidBindings','OutputContract','SourceClosure')] [string] $Mode = 'Verify',
     [switch] $CaptureCallBaseline,
     [string] $ApiCatalogPath,
     [string] $ApiPattern = 'M:System.String.Substring*',
@@ -98,6 +98,140 @@ function Import-PinnedLowering {
     if ($integrity.Commit -cne $pin) { throw 'PSLowering integrity revision mismatch.' }
     foreach ($record in $integrity.Files) { if ((Get-FileHash -LiteralPath (Join-Path $cache $record.Path)).Hash -cne $record.SHA256) { throw "PSLowering digest mismatch: $($record.Path)" } }
     Import-Module (Join-Path $cache 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1') -Force -Global
+}
+function Test-LoweredOutputContract([string] $SourcePath, [string] $ClassName, [string] $Fixture) {
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($SourcePath,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw "SMA validation failed: $SourcePath $($errors[0])" }
+    $methods = @($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionMemberAst] -and -not $node.IsConstructor},$true))
+    $admission = @(foreach ($method in $methods) {
+        try { $null = ConvertTo-TypedExpression -MethodAst $method; $status='Admitted'; $reason='' }
+        catch { $status='Rejected'; $reason=$_.Exception.Message }
+        @{Method=$method.Name;Line=$method.Extent.StartLineNumber;Status=$status;Reason=$reason}
+    })
+    $names = @($admission | Where-Object Status -eq Admitted | ForEach-Object Method)
+    $report = [ordered]@{Source=$SourcePath;SmaParsed=$true;Admission=$admission;IndependentIL=$null}
+    if (-not $names.Count) { return $report }
+    $directory = Join-Path $build "output-contract/$ClassName"
+    $outputs = @(foreach ($part in 'first','second') {
+        $path = Join-Path $directory "$part/$ClassName.dll"
+        $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
+        $null = Export-LoweredAssembly -SourcePath $SourcePath -ClassName $ClassName -MethodNames $names -OutputPath $path -Deterministic
+        $path
+    })
+    $hashes = @($outputs | ForEach-Object { (Get-FileHash -LiteralPath $_).Hash })
+    if ($hashes[0] -cne $hashes[1]) { throw "Nondeterministic lowered IL: $ClassName" }
+    $context = [Runtime.Loader.AssemblyLoadContext]::new("CS2PS-$ClassName",$true)
+    try {
+        $assembly = $context.LoadFromAssemblyPath($outputs[0])
+        $references = @($assembly.GetReferencedAssemblies().Name)
+        if ($references.Count -ne 1 -or $references[0] -cne 'System.Private.CoreLib') { throw "Unexpected assembly dependencies: $ClassName $($references -join ', ')" }
+        $oraclePath = (Get-ChildItem -LiteralPath $build -Filter "$ClassName.reference.*.dll" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).FullName
+        $oracle = $context.LoadFromAssemblyPath($oraclePath)
+        $cases = @(Get-Content -Raw -LiteralPath ([IO.Path]::ChangeExtension($Fixture,'cases.json')) | ConvertFrom-Json | Where-Object Method -in $names)
+        $originalCulture = [Globalization.CultureInfo]::CurrentCulture
+        try {
+            foreach ($culture in 'en-US','fr-FR') {
+                [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($culture)
+                foreach ($case in $cases) {
+                    $flags = [Reflection.BindingFlags]'Public,NonPublic,Static'
+                    $expectedMethod = $oracle.GetType($ClassName,$true).GetMethod($case.Method,$flags)
+                    $actualMethod = $assembly.GetType($ClassName,$true).GetMethod($case.Method,$flags)
+                    $parameters = $expectedMethod.GetParameters()
+                    $arguments = [object[]]::new($parameters.Count)
+                    for ($i=0; $i -lt $arguments.Count; $i++) {
+                        $arguments[$i] = if ($null -eq $case.Arguments[$i]) { $null } else { [Management.Automation.LanguagePrimitives]::ConvertTo($case.Arguments[$i],$parameters[$i].ParameterType) }
+                    }
+                    $outcomes = @(foreach ($method in @($expectedMethod,$actualMethod)) {
+                        try { $value=$method.Invoke($null,$arguments); @{Value=$value;Type=$(if ($null -ne $value) {$value.GetType().FullName});Exception=$null} }
+                        catch { @{Value=$null;Type=$null;Exception=$_.Exception.GetBaseException().GetType().FullName} }
+                    })
+                    if ($outcomes[0].Exception -cne $outcomes[1].Exception -or $outcomes[0].Type -cne $outcomes[1].Type -or $outcomes[0].Value -cne $outcomes[1].Value) {
+                        throw "Independent IL differs: $ClassName.$($case.Method) $culture; $($outcomes | ConvertTo-Json -Compress)"
+                    }
+                }
+            }
+        } finally { [Globalization.CultureInfo]::CurrentCulture = $originalCulture }
+        $report.IndependentIL = @{Path=$outputs[0];Bytes=(Get-Item -LiteralPath $outputs[0]).Length;SHA256=$hashes[0];Deterministic=$true;References=$references;CasesPerCulture=$cases.Count;Differences=0}
+    } finally { $context.Unload() }
+    return $report
+}
+if ($Mode -eq 'SourceClosure') {
+    $upstream = Join-Path $build 'cache/android-bindings/37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5/external/Java.Interop/src/Java.Interop.Tools.TypeNameMappings/Java.Interop.Tools.TypeNameMappings/JavaNativeTypeManager.cs'
+    # Validate the existing acquisition rather than reading an external checkout.
+    $cache = Join-Path $build 'cache/android-bindings/37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5'
+    $integrity = Get-Content -Raw -LiteralPath (Join-Path $cache 'integrity.json') | ConvertFrom-Json
+    $sourceRecord = @($integrity.Files | Where-Object Path -like '*/JavaNativeTypeManager.cs')[0]
+    if ((Get-FileHash -LiteralPath $upstream).Hash -cne $sourceRecord.SHA256) { throw 'Pinned Android source integrity failed.' }
+    $closure = Get-CS2PSSourceMemberClosure -Path $upstream -Member 'JavaNativeTypeManager.ToCliType(string)'
+    $directory = Join-Path $build 'source-closure'
+    Save-Text (Join-Path $directory 'closure.json') ($closure | ConvertTo-Json -Depth 12)
+    if ($closure.Members.Count -ne 3 -or @($closure.Members | Where-Object Kind -ne Method).Count) { throw 'JNI CLI-name dependency closure changed.' }
+    # This is the same explicitly scoped method-body comparison host used by
+    # AndroidBindings, not a claim to reproduce upstream type initialization.
+    $fixture = Join-Path $directory 'JavaNativeTypeManager.cs'
+    Save-Text $fixture ("// Method-body closure from dotnet/android $($integrity.Commit).`nusing System;`npublic static class JavaNativeTypeManager {`n" + (($closure.Members.Source) -join "`n") + "`n}`n")
+    $cases = @(foreach ($value in @($null,'','java/lang/String','java/util/Map$Entry','I','a/b/c','a//b','foo$bar$baz','éclair/value','[I','/','$')) {
+        @{Type='JavaNativeTypeManager';Method='ToCliType';Arguments=@($value)}
+    })
+    Save-Text ([IO.Path]::ChangeExtension($fixture,'cases.json')) ($cases | ConvertTo-Json -Depth 5)
+    $translation = ConvertFrom-CSharp -Path $fixture
+    Save-Text (Join-Path $directory 'JavaNativeTypeManager.ps1') $translation.PowerShell
+    if (@($translation.Diagnostics | Where-Object Severity -ne Information).Count) {
+        Save-Text (Join-Path $directory 'translation-gaps.json') ($translation.Diagnostics | ConvertTo-Json -Depth 5)
+        throw "Extracted source has explicit translation gaps: $($translation.Diagnostics | ConvertTo-Json -Compress)"
+    }
+    foreach ($culture in 'en-US','fr-FR') {
+        $log = @(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Fixture $fixture -Culture $culture -TraceBinding)
+        if ($LASTEXITCODE -or $log[-1] -cne "calls $($cases.Count), differences 0") { throw "Extracted source parity failed: $culture $($log -join '; ')" }
+    }
+    $peer = Join-Path $directory 'Peer.cs'; $caller = Join-Path $directory 'Caller.cs'
+    Save-Text $caller 'public static class Caller { public static int Run(int value) => Peer.Once(value); public static int Unused() => 0; }'
+    Save-Text $peer 'public static class Peer { public static int Once(int value) => value > 0 ? Caller.Run(value - 1) : 0; }'
+    $cycle = Get-CS2PSSourceMemberClosure -Path $caller,$peer -Member 'Caller.Run(int)'
+    if (-not $cycle.Closed -or $cycle.Members.Count -ne 2 -or @($cycle.Members | Where-Object Identity -match Unused).Count) { throw 'Cross-file recursive closure failed.' }
+    Import-PinnedLowering
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $directory 'JavaNativeTypeManager.ps1'),[ref]$tokens,[ref]$errors)
+    $admission = @(foreach ($method in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionMemberAst]},$true)) {
+        try { $null=ConvertTo-TypedExpression -MethodAst $method; @{Method=$method.Name;Status='Admitted'} }
+        catch { @{Method=$method.Name;Status='Rejected';Reason=$_.Exception.Message} }
+    })
+    $receipt = @{Commit=$integrity.Commit;Root=$closure.Root;SourceMembers=$closure.Members.Count;SourceEdges=@($closure.Edges | Where-Object Kind -eq SourceMember).Count;ExternalEdges=@($closure.Edges | Where-Object Kind -eq ExternalCLR).Count;Boundaries=$closure.Boundaries;WholeTypeClosed=$closure.Closed;Scope='Extracted original method bodies, not original upstream class initialization';CasesPerCulture=$cases.Count;Differences=0;Admission=$admission;CrossFileCyclePassed=$true}
+    Save-Text (Join-Path $directory 'receipt.json') ($receipt | ConvertTo-Json -Depth 12)
+    "Source closure: $($closure.Members.Count) methods; $($cases.Count) calls/culture; 0 differences; type boundaries $($closure.Boundaries.Count)"
+    $admission | ForEach-Object { "$($_.Method): $($_.Status) $($_.Reason)" }
+    return
+}
+if ($Mode -eq 'OutputContract') {
+    Import-PinnedLowering
+    $reports = @(foreach ($fixture in @((Join-Path $PSScriptRoot 'fixtures/ProgressLayout.cs'),(Join-Path $build 'android-bindings/JavaNativeTypeManager.cs'))) {
+        $name = [IO.Path]::GetFileNameWithoutExtension($fixture)
+        $translation = ConvertFrom-CSharp -Path $fixture -ClassOnly
+        if (@($translation.Diagnostics | Where-Object Severity -ne Information).Count) { throw "Translation failed: $name" }
+        $output = Join-Path $build "output-contract/$name.ps1"
+        Save-Text $output $translation.PowerShell
+        $sourceCases = @(Get-Content -Raw -LiteralPath ([IO.Path]::ChangeExtension($fixture,'cases.json')) | ConvertFrom-Json).Count
+        foreach ($culture in 'en-US','fr-FR') {
+            $log = @(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Fixture $fixture -Culture $culture -ClassOnly)
+            if ($LASTEXITCODE) { throw "Source parity failed: $name $culture" }
+            if ($log[-1] -cne "calls $sourceCases, differences 0") { throw "Unexpected class-only parity count: $name $culture" }
+        }
+        $report = Test-LoweredOutputContract $output $name $fixture
+        $ast = [Management.Automation.Language.Parser]::ParseFile($output,[ref]$null,[ref]$null)
+        if (@($ast.EndBlock.Statements | Where-Object { $_ -isnot [Management.Automation.Language.TypeDefinitionAst] }).Count) { throw "Class-only source contains top-level runtime logic: $name" }
+        $report.SmaParity = @{CasesPerCulture=$sourceCases;Differences=0;Cultures=@('en-US','fr-FR')}
+        $report.Helpers = @($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -match 'CS2PS'},$true)).Count
+        if ($report.Helpers) { throw "Targeted output still requires semantic helper calls: $name" }
+        $report
+    })
+    Save-Text (Join-Path $build 'output-contract/receipt.json') (@{PSLowering='1afabe056235a570da29e268824784557d4f6cdd';QuickPSReference='f1b1c9083d448c3ee893f878122de758849d4022';Outputs=$reports} | ConvertTo-Json -Depth 12)
+    foreach ($report in $reports) {
+        "$([IO.Path]::GetFileName($report.Source)): helpers $($report.Helpers); $(@($report.Admission | Where-Object Status -eq Admitted).Count) admitted; $(@($report.Admission | Where-Object Status -eq Rejected).Count) compiler gaps"
+        $report.Admission | Where-Object Status -eq Rejected | ForEach-Object { "$($_.Method): $($_.Reason)" }
+        if ($report.IndependentIL) { "Independent IL: $($report.IndependentIL.CasesPerCulture) calls/culture; 0 differences; deterministic; references $($report.IndependentIL.References -join ', ')" }
+    }
+    return
 }
 if ($Mode -eq 'AndroidBindings') {
     $pin = '37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5'
@@ -232,28 +366,9 @@ if ($Mode -eq 'AndroidBindings') {
     $admittedNames = @($admission | Where-Object {$_.Status -eq 'Admitted'} | ForEach-Object {$_.Method})
     $loweredReceipt = $null
     if ($admittedNames.Count) {
-        $loweredPath = Join-Path $directory 'JavaNativeTypeManager.lowered.dll'
-        $null = Export-LoweredAssembly -SourcePath $psPath -ClassName JavaNativeTypeManager -MethodNames $admittedNames -OutputPath $loweredPath
-        $loweredAssembly = [Reflection.Assembly]::LoadFrom($loweredPath)
-        $oracleFile = Get-ChildItem -LiteralPath $build -Filter 'JavaNativeTypeManager.reference.*.dll' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-        $oracleAssembly = [Reflection.Assembly]::LoadFrom($oracleFile.FullName)
-        $loweredCases = @($cases | Where-Object {$_.Method -in $admittedNames})
-        $priorCulture = [Globalization.CultureInfo]::CurrentCulture
-        try {
-            foreach ($culture in 'en-US','fr-FR') {
-                [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($culture)
-                foreach ($case in $loweredCases) {
-                    $flags = [Reflection.BindingFlags]'Public,NonPublic,Static'
-                    $arguments = [object[]]@($case.Arguments)
-                    $expected = $oracleAssembly.GetType('JavaNativeTypeManager',$true).GetMethod($case.Method,$flags).Invoke($null,$arguments)
-                    $actual = $loweredAssembly.GetType('JavaNativeTypeManager',$true).GetMethod($case.Method,$flags).Invoke($null,$arguments)
-                    if ($expected.GetType() -ne $actual.GetType() -or $expected -cne $actual) { throw "Lowered upstream JNI naming differs: $culture $($case.Method)" }
-                }
-            }
-        } finally { [Globalization.CultureInfo]::CurrentCulture = $priorCulture }
-        $dependencies = @($loweredAssembly.GetReferencedAssemblies().Name)
-        if (@($dependencies | Where-Object {$_ -ne 'System.Private.CoreLib'}).Count) { throw 'Lowered JNI naming helper has unexpected dependencies.' }
-        $loweredReceipt = @{Path=$loweredPath;SHA256=(Get-FileHash -LiteralPath $loweredPath).Hash;Methods=$admittedNames;CasesPerCulture=$loweredCases.Count;Differences=0;Dependencies=$dependencies}
+        $contract = Test-LoweredOutputContract $psPath JavaNativeTypeManager $slicePath
+        $loweredReceipt = $contract.IndependentIL
+        $loweredReceipt.Methods = $admittedNames
     }
     $receipt = @{Commit=$pin;Platform=36;Classes=$classes.Count;ApiMembers=$bindings.Count;SourceFiles=$attempts.Count;SourceMethods=$sourceMethods.Count;Attempts=@($attempts | ForEach-Object {@{Source=$_.Source;Status=$_.Status;CompilerErrors=$_.CompilerErrors.Count;Diagnostics=$_.Diagnostics.Count}});HelperMethods=3;HelperCasesPerCulture=$cases.Count;ConditionalCasesPerCulture=2;Cultures=@('en-US','fr-FR');Differences=0;HelperAdmission=$admission;DeviceExecution='NotRun';Scope='Declaration inventory and independent managed naming logic; not executable audio/lifecycle/TTS bindings';PowerShell=$PSVersionTable.PSVersion.ToString();Runtime=[Environment]::Version.ToString()}
     $receipt.Lowered = $loweredReceipt
@@ -351,17 +466,17 @@ if ($Mode -eq 'CallMatrix') {
         foreach ($suite in @(
             @{Name='Fixtures';Arguments=@();Expected=264},
             @{Name='Json.NET';Arguments=@('-Fixture',$jsonFixture,'-ReferencePath',$jsonReference);Expected=5},
-            @{Name='Call mappings';Arguments=@('-Fixture',(Join-Path $PSScriptRoot 'call-matrix/Calls.cs'));Expected=16}
+            @{Name='Call mappings';Arguments=@('-Fixture',(Join-Path $PSScriptRoot 'call-matrix/Calls.cs'));Expected=33}
         )) {
             $arguments = $suite.Arguments
-            $log = @(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Culture $culture -ApiCatalogPath $ApiCatalogPath @arguments)
+            $log = @(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Culture $culture -ApiCatalogPath $ApiCatalogPath -TraceBinding @arguments)
             if ($LASTEXITCODE) { throw "Call-matrix parity failed: $culture $($suite.Name); $($log -join '; ')" }
             $summary = @($log | Where-Object { $_ -match '^calls ([0-9]+), differences ([0-9]+)$' })[-1]
             if ($summary -notmatch '^calls ([0-9]+), differences 0$' -or [int]$Matches[1] -ne $suite.Expected) { throw "Unexpected parity count: $summary" }
             $total += $suite.Expected
             $parity.Add(@{Culture=$culture;Suite=$suite.Name;Calls=$suite.Expected;Differences=0})
         }
-        "$culture`: $total calls, 0 differences (269 existing + 16 binding regressions)"
+        "$culture`: $total calls, 0 differences (269 existing + 33 binding/string regressions)"
     }
     & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Diagnostics.ps1')
     if ($LASTEXITCODE) { throw 'Diagnostic suite failed.' }
@@ -490,7 +605,11 @@ foreach ($fixture in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'fixtur
     if ($fixture.BaseName -in $goldenNames) {
         if ($Mode -eq 'Golden') {
             if ([IO.File]::Exists($golden)) {
-                if ([IO.File]::ReadAllText($golden) -cne $result.PowerShell) { throw "Golden already exists; review before replacement: $golden" }
+                if ([IO.File]::ReadAllText($golden) -cne $result.PowerShell) {
+                    $backup = Join-Path $build ('golden-backup/' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '/' + [IO.Path]::GetFileName($golden))
+                    Save-Text $backup ([IO.File]::ReadAllText($golden))
+                    Save-Text $golden $result.PowerShell
+                }
             } else { Save-Text $golden $result.PowerShell }
         } elseif (-not [IO.File]::Exists($golden) -or [IO.File]::ReadAllText($golden) -cne $result.PowerShell) { throw "Golden mismatch: $($fixture.Name)" }
     }

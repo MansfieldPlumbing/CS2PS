@@ -23,4 +23,12 @@ foreach ($source in $cases) {
     if (-not $result.Diagnostics.Count -or @($result.Diagnostics | Where-Object { $_.Line -lt 1 }).Count) { throw 'Expected a line-numbered diagnostic' }
     if ($result.PowerShell -notmatch '# CS2PS: unsupported at line' -or $result.PowerShell -notmatch 'throw \[NotSupportedException\]') { throw 'Diagnostic output must be marked and fail closed' }
 }
-"diagnostic cases $($cases.Count), failures 0"
+$classOnlyCases = @(
+    'public class C { public static int F(ref int value) { return value; } }',
+    'public class C { public static int F(int[] values, int index) { return values[index]; } }'
+)
+foreach ($source in $classOnlyCases) {
+    $result = ConvertFrom-CSharp -Source $source -ClassOnly
+    if (-not @($result.Diagnostics | Where-Object { $_.Line -gt 0 -and $_.Severity -eq 'Error' }).Count -or $result.PowerShell -notmatch 'throw \[NotSupportedException\]') { throw 'Class-only emission silently omitted required function semantics.' }
+}
+"diagnostic cases $($cases.Count + $classOnlyCases.Count), failures 0"

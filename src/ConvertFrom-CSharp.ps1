@@ -28,6 +28,7 @@ function ConvertFrom-CSharp {
         [Parameter(Mandatory, ParameterSetName = 'Path')] [string] $Path,
         [Parameter(Mandatory, ParameterSetName = 'Source')] [string] $Source,
         [string] $ApiCatalogPath,
+        [switch] $ClassOnly,
         [string[]] $Define = @(),
         [string[]] $ReferencePath = @()
     )
@@ -53,6 +54,8 @@ function ConvertFrom-CSharp {
     $script:MethodNames = @{}
     $script:ClassMethods = @{}
     $script:ClassContext = $false
+    $script:GuardedStrings = $null
+    $script:ClassOnly = [bool]$ClassOnly
     $script:Names = @{}
     $script:NameScopes = @{}
     $script:Renames = [Collections.Generic.List[object]]::new()
@@ -292,17 +295,24 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
     foreach ($type in $types) { [void]$out.AppendLine((Convert-TypeDeclaration $type)) }
     foreach ($type in $types) {
         foreach ($m in $type.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] }) {
-            [void]$out.AppendLine((Convert-Method $type $m)).AppendLine()
+            $function = Convert-Method $type $m
+            if ($ClassOnly) {
+                if (-not $script:ClassMethods.ContainsKey($m.Span.Start)) { Add-Diagnostic $m 'Class-only output requires a method that preserves semantics as a PowerShell class method.' }
+            } else { [void]$out.AppendLine($function).AppendLine() }
         }
     }
     # Retain only calls reachable from this unit, including helper dependencies.
     $body = $out.ToString()
-    $helperAst = [Management.Automation.Language.Parser]::ParseInput($helpers, [ref]$null, [ref]$null)
+    $helperErrors = $null
+    $helperAst = [Management.Automation.Language.Parser]::ParseInput($helpers, [ref]$null, [ref]$helperErrors)
+    if ($helperErrors.Count) { throw "Invalid translator support source: $($helperErrors[0])" }
     $definitions = @{}
     foreach ($function in $helperAst.FindAll({ param($ast) $ast -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) { $definitions[$function.Name] = $function }
     $required = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $pending = [Collections.Generic.Queue[string]]::new()
-    $bodyAst = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$null)
+    $bodyErrors = $null
+    $bodyAst = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$bodyErrors)
+    foreach ($error in $bodyErrors) { Add-Diagnostic ($tree.GetRoot()) "Generated PowerShell $($error.ErrorId) at output line $($error.Extent.StartLineNumber): $($error.Message)" }
     foreach ($command in $bodyAst.FindAll({ param($ast) $ast -is [Management.Automation.Language.CommandAst] }, $true)) {
         $name = $command.GetCommandName()
         if ($name -and $definitions.ContainsKey($name) -and $required.Add($name)) { $pending.Enqueue($name) }
@@ -314,8 +324,17 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
         }
     }
     if ($required.Count) {
+        if ($ClassOnly) { Add-Diagnostic ($tree.GetRoot()) ('Class-only output still requires semantic support functions: ' + (($required | Sort-Object) -join ', ')) }
         [void]$out.AppendLine('# Semantic support used by this file.')
         foreach ($function in $helperAst.EndBlock.Statements) { if ($required.Contains($function.Name)) { [void]$out.AppendLine($function.Extent.Text) } }
+    }
+    # Validate the complete compilation unit before it crosses the converter boundary.
+    $finalErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseInput($out.ToString(),[ref]$null,[ref]$finalErrors)
+    foreach ($error in $finalErrors) {
+        if (-not @($bodyErrors | Where-Object { $_.ErrorId -ceq $error.ErrorId -and $_.Extent.StartOffset -eq $error.Extent.StartOffset }).Count) {
+            Add-Diagnostic ($tree.GetRoot()) "Generated PowerShell $($error.ErrorId) at output line $($error.Extent.StartLineNumber): $($error.Message)"
+        }
     }
     # Fail closed: a diagnostic never leaves a partially translated program executable.
     if (@($script:Diagnostics | Where-Object Severity -NE 'Information').Count) {
@@ -336,6 +355,97 @@ function Initialize-Roslyn {
     foreach ($n in 'Microsoft.CodeAnalysis.dll', 'Microsoft.CodeAnalysis.CSharp.dll') {
         [void][Reflection.Assembly]::LoadFrom([IO.Path]::Combine($PSHOME, $n))
     }
+}
+
+function Get-CS2PSSourceMemberClosure {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]] $Path, [Parameter(Mandatory)][string] $Member,
+        [string[]] $ReferencePath = @(), [string[]] $Define = @(), [string] $ApiCatalogPath)
+    Initialize-Roslyn
+    $options = [Microsoft.CodeAnalysis.CSharp.CSharpParseOptions]::Default.WithPreprocessorSymbols($Define)
+    $trees = [Microsoft.CodeAnalysis.SyntaxTree[]]@(foreach ($file in $Path) {
+        $resolved = (Resolve-Path -LiteralPath $file).Path
+        [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText([IO.File]::ReadAllText($resolved),$options,$resolved)
+    })
+    $runtime = [IO.Path]::GetDirectoryName([object].Assembly.Location)
+    $references = [Microsoft.CodeAnalysis.MetadataReference[]]@(
+        foreach ($file in @('System.Private.CoreLib.dll','System.Runtime.dll','System.Collections.dll','System.Console.dll')) {
+            [Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile((Join-Path $runtime $file))
+        }
+        foreach ($file in $ReferencePath) { [Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile((Resolve-Path -LiteralPath $file).Path) }
+    )
+    $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create('CS2PS.Closure',$trees,$references,
+        [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::DynamicallyLinkedLibrary))
+    $catalog = if ($ApiCatalogPath) { Import-CS2PSApiCatalog -Path $ApiCatalogPath }
+    $compilationErrors = @($compilation.GetDiagnostics() | Where-Object Severity -eq ([Microsoft.CodeAnalysis.DiagnosticSeverity]::Error))
+    $roots = @(foreach ($tree in $trees) {
+        $model = $compilation.GetSemanticModel($tree)
+        foreach ($node in $tree.GetRoot().DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] }) {
+            $symbol = $model.GetDeclaredSymbol($node)
+            if ($symbol.ToString() -ceq $Member -or $symbol.ToString().EndsWith('.' + $Member,[StringComparison]::Ordinal)) { $symbol }
+        }
+    })
+    if ($roots.Count -ne 1) { throw "Select one exact method signature; '$Member' matches $($roots.Count) declarations." }
+    $pending = [Collections.Generic.Queue[object]]::new()
+    $pending.Enqueue($roots[0])
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $members = [Collections.Generic.List[object]]::new()
+    $edges = [Collections.Generic.List[object]]::new()
+    $boundaries = [Collections.Generic.List[object]]::new()
+    $typeInitializers = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    while ($pending.Count) {
+        $symbol = $pending.Dequeue()
+        $identity = $symbol.ToString()
+        if (-not $seen.Add($identity)) { continue }
+        foreach ($reference in $symbol.DeclaringSyntaxReferences) {
+            $sourceTree = $reference.SyntaxTree
+            $node = $sourceTree.GetRoot().FindNode($reference.Span,$false,$true)
+            $model = $compilation.GetSemanticModel($sourceTree)
+            $members.Add([pscustomobject]@{Identity=$identity;Kind=$symbol.Kind.ToString();Path=$sourceTree.FilePath;Line=$sourceTree.GetLineSpan($node.Span).StartLinePosition.Line+1;Start=$node.Span.Start;Length=$node.Span.Length;Source=$node.ToString()})
+            if ($symbol.Kind.ToString() -eq 'Method' -and $symbol.MethodKind.ToString() -eq 'Constructor') {
+                $boundaries.Add(@{Kind='ConstructorInitialization';Member=$identity;Reason='Base constructor and instance field initialization require an explicit initialization closure.'})
+            }
+            # Type initialization and dispatch are explicit boundaries, not silently
+            # erased by a method-body extraction. This is not a whole-program linker.
+            if ($symbol.ContainingType -and $typeInitializers.Add($symbol.ContainingType.ToString())) {
+                foreach ($typeReference in $symbol.ContainingType.DeclaringSyntaxReferences) {
+                    $typeNode = $typeReference.SyntaxTree.GetRoot().FindNode($typeReference.Span,$false,$true)
+                    foreach ($initializer in $typeNode.Members | Where-Object {
+                        ($_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax] -and $_.Modifiers.Text -contains 'static') -or
+                        ($_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax] -and $_.Modifiers.Text -contains 'static' -and @($_.Declaration.Variables | Where-Object Initializer).Count) -or
+                        ($_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax] -and $_.Modifiers.Text -contains 'static' -and $_.Initializer)
+                    }) { $boundaries.Add(@{Kind='TypeInitialization';Member=$symbol.ContainingType.ToString();Path=$typeReference.SyntaxTree.FilePath;Line=$typeReference.SyntaxTree.GetLineSpan($initializer.Span).StartLinePosition.Line+1;Source=$initializer.ToString()}) }
+                }
+            }
+            foreach ($error in $compilationErrors | Where-Object { $_.Location.SourceTree -eq $sourceTree -and $node.Span.IntersectsWith($_.Location.SourceSpan) }) {
+                $boundaries.Add(@{Kind='UnresolvedSource';Member=$identity;Line=$error.Location.GetLineSpan().StartLinePosition.Line+1;Reason=$error.ToString()})
+            }
+            foreach ($use in $node.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax] }) {
+                $target = $model.GetSymbolInfo($use).Symbol
+                if (-not $target -or $target.Kind.ToString() -notin 'Method','Field','Property','Event') { continue }
+                if ($target.Kind.ToString() -eq 'Method' -and $target.ReducedFrom) { $target = $target.ReducedFrom }
+                $target = $target.OriginalDefinition
+                $edge = [ordered]@{From=$identity;To=$target.ToString();Path=$sourceTree.FilePath;Line=$sourceTree.GetLineSpan($use.Span).StartLinePosition.Line+1}
+                if ($target.DeclaringSyntaxReferences.Length) {
+                    $edge.Kind = 'SourceMember'
+                    $pending.Enqueue($target)
+                    if ($target.Kind.ToString() -eq 'Method' -and ($target.IsVirtual -or $target.IsAbstract -or $target.IsOverride)) { $boundaries.Add(@{Kind='RuntimeDispatch';Member=$target.ToString();Line=$edge.Line}) }
+                } elseif ([Microsoft.CodeAnalysis.SymbolEqualityComparer]::Default.Equals($target.ContainingAssembly,$compilation.Assembly)) {
+                    $edge.Kind = 'ImplicitSourceMember'
+                    $boundaries.Add(@{Kind='ImplicitSourceMember';Member=$target.ToString();Line=$edge.Line;Reason='Source-generated or implicit member has no supplied declaration body.'})
+                } else {
+                    $edge.Kind = 'ExternalCLR'
+                    $edge.Assembly = $target.ContainingAssembly.Identity.ToString()
+                    $edge.Api = Get-CS2PSApiId $target
+                    $edge.CatalogMatched = $false
+                    if ($catalog) { $edge.CatalogMatched = @(Find-CS2PSApi -Catalog $catalog -AssemblyIdentity $edge.Assembly -Id $edge.Api -Limit 2).Count -eq 1 }
+                    $edge.Semantics = 'Unreviewed'
+                }
+                $edges.Add([pscustomobject]$edge)
+            }
+        }
+    }
+    [pscustomobject]@{Root=$roots[0].ToString();Scope='Transitive method-body source-member graph; type initialization and dispatch are separate explicit boundaries';Members=@($members | Sort-Object Path,Start);Edges=@($edges | Sort-Object From,To,Line -Unique);Boundaries=@($boundaries);Closed=$boundaries.Count -eq 0;Sources=@($trees | ForEach-Object { @{Path=$_.FilePath;SHA256=(Get-FileHash -LiteralPath $_.FilePath).Hash} })}
 }
 
 function Add-Diagnostic($node, [string] $message, [string] $severity = 'Error') {
@@ -432,6 +542,8 @@ function Test-NullObservable($symbol) {
         $target -and $target.DeclaringSyntaxReferences.Length -and $target.DeclaringSyntaxReferences[0].Span.Start -eq $symbol.DeclaringSyntaxReferences[0].Span.Start
     })
     if ($symbol.Kind.ToString() -eq 'Local' -and $declaration.Initializer -and (Test-NonNullStringExpression $declaration.Initializer.Value)) {
+        $flow = [Microsoft.CodeAnalysis.CSharp.CSharpExtensions]::AnalyzeDataFlow($script:Model,$scope.Body)
+        if (-not $flow.Succeeded -or @($flow.Captured | Where-Object { [Microsoft.CodeAnalysis.SymbolEqualityComparer]::Default.Equals($_,$symbol) }).Count) { return $true }
         if (@($references | Where-Object { $_.Parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.ArgumentSyntax] -and $_.Parent.RefKindKeyword.Text }).Count) { return $true }
         $writes = @($references | Where-Object { $_.Parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.AssignmentExpressionSyntax] -and $_.Parent.Left -eq $_ })
         if (-not @($writes | Where-Object { -not (Test-NonNullStringExpression $_.Parent.Right) }).Count) { return $false }
@@ -439,6 +551,12 @@ function Test-NullObservable($symbol) {
     foreach ($reference in $references) {
         $parent = $reference.Parent
         if ($parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.BinaryExpressionSyntax] -and $parent.OperatorToken.Text -eq '+' -and (Test-String (Get-ExprType $parent))) { continue }
+        if ($parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.BinaryExpressionSyntax] -and $parent.OperatorToken.Text -in '==','!=') {
+            $other = if ($parent.Left -eq $reference) { $parent.Right } else { $parent.Left }
+            $constant = $script:Model.GetConstantValue($other)
+            # Null and empty both compare unequal to the same nonempty constant.
+            if ($constant.HasValue -and $constant.Value -is [string] -and $constant.Value.Length -gt 0) { continue }
+        }
         # Other uses may expose null identity, a null return or a null dereference.
         return $true
     }
@@ -453,14 +571,60 @@ function Test-ProvenNonNull($expression) {
     if ((Test-String (Get-ExprType $expression)) -and (Test-NonNullStringExpression $expression)) { return $true }
     if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) {
         $symbol = $script:Model.GetSymbolInfo($expression).Symbol
+        if ($script:GuardedStrings -and $script:GuardedStrings.Contains($symbol.ToString())) { return $true }
         return (Test-String $symbol.Type) -and -not (Test-NullObservable $symbol)
     }
     return $false
 }
 function Convert-Receiver($expression) {
     $text = Convert-Expression $expression
-    if (Test-ProvenNonNull $expression) { return $text }
+    if (Test-ProvenNonNull $expression) {
+        if ((Test-String (Get-ExprType $expression)) -and $expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) {
+            $symbol = $script:Model.GetSymbolInfo($expression).Symbol
+            if ((Get-StorageType $symbol.Type $symbol) -eq 'object') { return "([string]$text)" }
+        }
+        return $text
+    }
     return "(Get-CS2PSReceiver ($text) <# C# null dereferences throw NullReferenceException. #>)"
+}
+function Get-FirstStringReceiver($expression) {
+    if (-not $expression) { return $null }
+    switch ($expression.GetType().Name) {
+        'ParenthesizedExpressionSyntax' { return Get-FirstStringReceiver $expression.Expression }
+        'BinaryExpressionSyntax' { return Get-FirstStringReceiver $expression.Left }
+        'ConditionalExpressionSyntax' { return Get-FirstStringReceiver $expression.Condition }
+        'MemberAccessExpressionSyntax' {
+            $member = $script:Model.GetSymbolInfo($expression).Symbol
+            # Length has no arguments or side effects before its null dereference.
+            if ($member -and $member.Kind.ToString() -eq 'Property' -and $member.Name -ceq 'Length' -and
+                (Test-String $member.ContainingType) -and $expression.Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) {
+                return $expression.Expression
+            }
+        }
+    }
+    return $null
+}
+function Test-NonNullStringResult($expression) {
+    if (Test-ProvenNonNull $expression) { return $true }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ParenthesizedExpressionSyntax]) { return Test-NonNullStringResult $expression.Expression }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ConditionalExpressionSyntax]) {
+        return (Test-NonNullStringResult $expression.WhenTrue) -and (Test-NonNullStringResult $expression.WhenFalse)
+    }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax]) {
+        $method = $script:Model.GetSymbolInfo($expression).Symbol
+        # These String instance methods return a string on every successful path.
+        return $method -and (Test-String $method.ContainingType) -and $method.Name -cin @('Substring','ToUpperInvariant','ToLowerInvariant','Format','Concat')
+    }
+    return $false
+}
+function Get-MethodReturnType($method, $symbol) {
+    if (Test-Nullable $symbol.ReturnType) { return 'object' }
+    if (-not (Test-String $symbol.ReturnType)) { return Get-PsTypeName $symbol.ReturnType }
+    $returns = if ($method.ExpressionBody) { @($method.ExpressionBody.Expression) } else {
+        @($method.Body.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.ReturnStatementSyntax] } | ForEach-Object Expression)
+    }
+    if ($returns.Count -and -not @($returns | Where-Object { -not (Test-NonNullStringResult $_) }).Count) { return 'string' }
+    return 'object'
 }
 function Get-DefaultValue($type) {
     if (Test-SourceStruct $type) { return "[$(Get-PsTypeName $type)]::new()" }
@@ -517,15 +681,19 @@ function Convert-TypeDeclaration($node) {
     }
     foreach ($method in $node.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] -and $script:ClassMethods.ContainsKey($_.Span.Start) }) {
         $declared = $script:Model.GetDeclaredSymbol($method)
-        $returnType = if ((Test-String $declared.ReturnType) -or (Test-Nullable $declared.ReturnType)) { 'object' } else { Get-PsTypeName $declared.ReturnType }
+        $returnType = Get-MethodReturnType $method $declared
         if (-not $returnType) { $returnType = 'void' }
-        $parameters = @($declared.Parameters | ForEach-Object { "[$(Get-StorageType $_.Type $_)] `$$(Get-VariableName $_)" })
+        $parameters = @($declared.Parameters | ForEach-Object {
+            $storage = Get-StorageType $_.Type $_
+            $note = if ((Test-String $_.Type) -and $storage -eq 'object') { ' <# Preserve C# null versus empty. #>' } else { '' }
+            "[$storage] `$$(Get-VariableName $_)$note"
+        })
         $static = if ($declared.IsStatic) { 'static ' } else { '' }
         $text += "    $static[$returnType] $($script:ClassMethods[$method.Span.Start])($($parameters -join ', ')) {`n"
         $script:ClassContext = $true
         try {
             if ($method.Body) { foreach ($statement in $method.Body.Statements) { $text += Convert-Statement $statement 2 } }
-            elseif ($method.ExpressionBody) { $text += "        return $(Convert-Value $method.ExpressionBody.Expression)`n" }
+            elseif ($method.ExpressionBody) { $text += Convert-ReturnExpression $method.ExpressionBody.Expression 2 }
         } finally { $script:ClassContext = $false }
         $text += "    }`n"
     }
@@ -681,7 +849,7 @@ function Convert-Method($type, $m) {
     $before = $script:Diagnostics.Count
     foreach ($parameter in $symbol.Parameters) { if (-not (Test-SupportedValueType $parameter.Type) -or $parameter.IsParams -or $parameter.HasExplicitDefaultValue) { Add-Diagnostic $m 'unsupported parameter type, params or optional parameter' } }
     $classMethod = $script:ClassMethods[$m.Span.Start]
-    $script:Methods.Add([pscustomobject]@{ Type = $symbol.ContainingType.ToString(); Method = $symbol.Name; Function = $(if ($classMethod -and -not $symbol.IsStatic) { $null } else { $name }); ClassMethod = $classMethod; IsStatic = $symbol.IsStatic; Parameters = @($symbol.Parameters | ForEach-Object { Get-VariableName $_ }) })
+    $script:Methods.Add([pscustomobject]@{ Type = $symbol.ContainingType.ToString(); Method = $symbol.Name; Function = $(if ($script:ClassOnly -or ($classMethod -and -not $symbol.IsStatic)) { $null } else { $name }); ClassMethod = $classMethod; IsStatic = $symbol.IsStatic; Parameters = @($symbol.Parameters | ForEach-Object { Get-VariableName $_ }) })
     if ($script:ClassMethods.ContainsKey($m.Span.Start)) {
         if ($symbol.IsStatic) {
             $parameters = @($symbol.Parameters | ForEach-Object { "[$(Get-StorageType $_.Type $_)] `$$(Get-VariableName $_)" })
@@ -717,7 +885,53 @@ function Convert-Method($type, $m) {
     $sb.ToString()
 }
 
+function Convert-ReturnExpression($expression, [int] $depth) {
+    $pad = '    ' * $depth
+    if (-not $expression) { return "${pad}return`n" }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ParenthesizedExpressionSyntax]) { return Convert-ReturnExpression $expression.Expression $depth }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ConditionalExpressionSyntax]) {
+        return "${pad}if ($(Convert-Expression $expression.Condition)) {`n$(Convert-ReturnExpression $expression.WhenTrue ($depth + 1))${pad}}`n$(Convert-ReturnExpression $expression.WhenFalse $depth)"
+    }
+    if ($script:ClassContext) { return "${pad}return $(Convert-Value $expression)`n" }
+    return "${pad}return ,($(Convert-Value $expression))`n"
+}
 function Convert-Statement($s, [int] $depth) {
+    $expression = switch ($s.GetType().Name) {
+        'IfStatementSyntax' { $s.Condition }
+        'ReturnStatementSyntax' { $s.Expression }
+    }
+    $receiver = Get-FirstStringReceiver $expression
+    if (-not $receiver -or (Test-ProvenNonNull $receiver)) { return Convert-StatementCore $s $depth }
+    $symbol = $script:Model.GetSymbolInfo($receiver).Symbol
+    if ($symbol.Kind.ToString() -notin 'Local','Parameter') { return Convert-StatementCore $s $depth }
+    $flow = [Microsoft.CodeAnalysis.CSharp.CSharpExtensions]::AnalyzeDataFlow($script:Model,$s)
+    $control = [Microsoft.CodeAnalysis.CSharp.CSharpExtensions]::AnalyzeControlFlow($script:Model,$s)
+    if (-not $flow.Succeeded -or -not $control.Succeeded -or $control.EntryPoints.Length -or
+        @($flow.Captured | Where-Object { [Microsoft.CodeAnalysis.SymbolEqualityComparer]::Default.Equals($_,$symbol) }).Count) {
+        return Convert-StatementCore $s $depth
+    }
+    # Never carry this fact past a write, a later statement or a side-effecting call.
+    if (@($s.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.AssignmentExpressionSyntax] -or $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax] } | Where-Object {
+        if ($_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.AssignmentExpressionSyntax]) {
+            $written = $script:Model.GetSymbolInfo($_.Left).Symbol
+            return $written -and $written.ToString() -ceq $symbol.ToString() -and -not (Test-NonNullStringExpression $_.Right)
+        }
+        return @($_.ArgumentList.Arguments | Where-Object {
+            $argumentSymbol = $script:Model.GetSymbolInfo($_.Expression).Symbol
+            $_.RefKindKeyword.Text -and $argumentSymbol -and $argumentSymbol.ToString() -ceq $symbol.ToString()
+        }).Count -gt 0
+    }).Count) { return Convert-StatementCore $s $depth }
+    $prior = $script:GuardedStrings
+    $script:GuardedStrings = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if ($prior) { $script:GuardedStrings.UnionWith($prior) }
+    [void]$script:GuardedStrings.Add($symbol.ToString())
+    try {
+        $pad = '    ' * $depth
+        $guard = "${pad}if (`$null -eq `$$(Get-VariableName $symbol)) { throw [NullReferenceException]::new() } # C# string dereference rejects null.`n"
+        return $guard + (Convert-StatementCore $s $depth)
+    } finally { $script:GuardedStrings = $prior }
+}
+function Convert-StatementCore($s, [int] $depth) {
     $pad = '    ' * $depth
     switch ($s.GetType().Name) {
         'LocalDeclarationStatementSyntax' {
@@ -740,7 +954,7 @@ function Convert-Statement($s, [int] $depth) {
             }
             return "${pad}[void]($(Convert-Expression $s.Expression))`n"
         }
-        'ReturnStatementSyntax' { return $(if ($s.Expression) { if ($script:ClassContext) { "${pad}return $(Convert-Value $s.Expression)`n" } else { "${pad}return ,($(Convert-Value $s.Expression))`n" } } else { "${pad}return`n" }) }
+        'ReturnStatementSyntax' { return Convert-ReturnExpression $s.Expression $depth }
         'EmptyStatementSyntax' { return '' }
         'CheckedStatementSyntax' { return Convert-Embedded $s.Block $depth }
         'ThrowStatementSyntax' {
@@ -901,7 +1115,10 @@ function Convert-Expression($e) {
             if ($v -is [string]) { return "'" + ($v -replace "'", "''") + "'" }
             if ($v -is [bool]) { return $(if ($v) { '$true' } else { '$false' }) }
             if ($null -eq $v) { return '$null' }
-            if ($v -is [char]) { return "[char]$([int]$v)" }
+            if ($v -is [char]) {
+                if (-not [char]::IsControl($v) -and -not [char]::IsSurrogate($v)) { return "[char]'$($v.ToString().Replace("'","''"))'" }
+                return "[char]$([int]$v)"
+            }
             $t = Get-ExprType $e
             $literal = $v.ToString([Globalization.CultureInfo]::InvariantCulture)
             return Convert-NumericLiteral $v $t
@@ -1033,6 +1250,9 @@ function Convert-Expression($e) {
             if ($e.ArgumentList.Arguments.Count -ne 1) { Add-Diagnostic $e 'multidimensional index'; return '$null' }
             $collectionType = Get-ExprType $e.Expression
             if ($collectionType -isnot [Microsoft.CodeAnalysis.IArrayTypeSymbol] -and -not (Test-String $collectionType) -and $collectionType.OriginalDefinition.ToString() -cne 'System.Collections.Generic.List<T>') { Add-Diagnostic $e 'index requires array, string or List<T>'; return '$null' }
+            if (Test-String $collectionType) {
+                return "$(Convert-Receiver $e.Expression).get_Chars($(Convert-Expression $e.ArgumentList.Arguments[0].Expression)) <# CLR string indexer preserves C# bounds exceptions. #>"
+            }
             return "(Get-CS2PSElement ($(Convert-Expression $e.Expression)) ($(Convert-Expression $e.ArgumentList.Arguments[0].Expression)))"
         }
         'ObjectCreationExpressionSyntax' {
@@ -1111,7 +1331,18 @@ function Convert-Expression($e) {
                         $values = $head + @((New-ArgumentArray $tail))
                     }
                 }
-                if ($values.Count -ne $sym.Parameters.Length) { Add-Diagnostic $e 'optional runtime arguments'; return '$null' }
+                while ($values.Count -lt $sym.Parameters.Length) {
+                    $parameter = $sym.Parameters[$values.Count]
+                    if (-not $parameter.HasExplicitDefaultValue -or ($null -eq $parameter.ExplicitDefaultValue -and $parameter.Type.IsValueType)) { break }
+                    $default = $parameter.ExplicitDefaultValue
+                    $value = if ($null -eq $default) { '$null' }
+                        elseif ($default -is [string]) { "'$($default.Replace("'","''"))'" }
+                        elseif ($default -is [bool]) { if ($default) { '$true' } else { '$false' } }
+                        elseif ($parameter.Type.TypeKind.ToString() -eq 'Enum') { "[$(Get-PsTypeName $parameter.Type)]$default" }
+                        else { Convert-NumericLiteral $default $parameter.Type }
+                    $values += $value
+                }
+                if ($values.Count -ne $sym.Parameters.Length) { Add-Diagnostic $e 'optional runtime argument has no supported constant default'; return '$null' }
                 $static = if ($sym.IsStatic) { '$true' } else { '$false' }
                 # The catalog establishes identity; the correspondence rule decides emission.
                 $inventory = if ($script:ApiCatalog) { @(Find-CS2PSApi -Catalog $script:ApiCatalog -AssemblyIdentity $sym.ContainingAssembly.Identity.ToString() -Id (Get-CS2PSApiId $sym) -Limit 2) } else { @() }
@@ -1119,6 +1350,10 @@ function Convert-Expression($e) {
                 $mapping = Get-CS2PSInvocationCorrespondence $sym $e $values
                 $direct = $mapping.Outcome -ne 'Exact fallback'
                 $script:ApiCalls.Add([pscustomobject]@{Id=(Get-CS2PSApiId $sym); Assembly=$sym.ContainingAssembly.Identity.ToString(); Line=$e.GetLocation().GetLineSpan().StartLinePosition.Line+1; SourceStart=$e.Span.Start; SourceLength=$e.Span.Length; CatalogMatched=$inventory.Count -eq 1; Form=if ($direct) {'Direct'} else {'Reflection'}; Outcome=$mapping.Outcome; Rule=$mapping.Rule; Casts=$mapping.Casts; SelectedSignature=$mapping.SelectedSignature; Evidence=$mapping.Evidence; Reasons=@($mapping.Reasons); Semantics=if ($inventory.Count) {$inventory[0].Api.Semantics} else {'Unreviewed'}; Lowering='Unknown'})
+                $script:ApiCalls[-1] | Add-Member -NotePropertyName BindingProof -NotePropertyValue $mapping.Proof
+                $script:ApiCalls[-1] | Add-Member -NotePropertyName ExpectedTrace -NotePropertyValue $mapping.ExpectedTrace
+                $sourceMethod = @($e.Ancestors() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] })[0]
+                $script:ApiCalls[-1] | Add-Member -NotePropertyName SourceMethod -NotePropertyValue $sourceMethod.Identifier.ValueText
                 if ($direct) { return Write-CS2PSInvocationAst $mapping.Ast }
                 $receiver = if ($sym.IsStatic) { '$null' } else { Convert-Expression $e.Expression.Expression }
                 return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static) <# $($mapping.Reasons -join ' ') #>"

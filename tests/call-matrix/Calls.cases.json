@@ -14,5 +14,22 @@
   {"Type":"CallMappings","Method":"Parse","Arguments":["42"]},
   {"Type":"CallMappings","Method":"Once","Arguments":[]},
   {"Type":"CallMappings","Method":"Write","Arguments":[null]},
-  {"Type":"CallMappings","Method":"Write","Arguments":[1.25]}
+  {"Type":"CallMappings","Method":"Write","Arguments":[1.25]},
+  {"Type":"CallMappings","Method":"BeforeNullCheck","Arguments":[null]},
+  {"Type":"CallMappings","Method":"BeforeNullCheck","Arguments":["abc"]},
+  {"Type":"CallMappings","Method":"ShortCircuit","Arguments":[false,null]},
+  {"Type":"CallMappings","Method":"ShortCircuit","Arguments":[true,null]},
+  {"Type":"CallMappings","Method":"ClearedInsideBranch","Arguments":["abc"]},
+  {"Type":"CallMappings","Method":"ClearedInsideBranch","Arguments":[""]},
+  {"Type":"CallMappings","Method":"Empty","Arguments":[null]},
+  {"Type":"CallMappings","Method":"Empty","Arguments":[""]},
+  {"Type":"CallMappings","Method":"Named","Arguments":[null]},
+  {"Type":"CallMappings","Method":"Named","Arguments":["named"]},
+  {"Type":"CallMappings","Method":"Named","Arguments":["NAMED"]},
+  {"Type":"CallMappings","Method":"Indexed","Arguments":[null,0]},
+  {"Type":"CallMappings","Method":"Indexed","Arguments":["abc",-1]},
+  {"Type":"CallMappings","Method":"Indexed","Arguments":["abc",3]},
+  {"Type":"CallMappings","Method":"Indexed","Arguments":["abc",1]},
+  {"Type":"CallMappings","Method":"NullableResult","Arguments":[null]},
+  {"Type":"CallMappings","Method":"NullableResult","Arguments":[""]}
 ]

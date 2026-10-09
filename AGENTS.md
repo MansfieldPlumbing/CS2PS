@@ -20,6 +20,10 @@
 - Call emission rules and their compiler-source evidence live in
   docs/CALL-CORRESPONDENCE.md. Use the existing CallMatrix acceptance mode;
   catalog membership alone must not select an emission form.
+- Typed output, QuickPS source-set handoff, separate executable gates and source-member
+  extraction boundaries live in docs/OUTPUT-CONTRACT.md. Use OutputContract and
+  SourceClosure in the existing acceptance instrument. Runtime trace observations
+  and parity are evidence for exercised inputs, not universal binding proofs.
 - Android audio/JNI/lifecycle/TTS extraction starts at docs/ANDROID-BINDINGS.md
   and the existing AndroidBindings mode. Declaration counts are not executable
   bindings; keep source closure, parity, lowering and device receipts separate.
