@@ -18,14 +18,20 @@
 .OUTPUTS
     An object with the generated PowerShell text and its diagnostics.
 #>
+. (Join-Path $PSScriptRoot 'DotNetApiCatalog.ps1')
+
 function ConvertFrom-CSharp {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory, ParameterSetName = 'Path')] [string] $Path,
-        [Parameter(Mandatory, ParameterSetName = 'Source')] [string] $Source
+        [Parameter(Mandatory, ParameterSetName = 'Source')] [string] $Source,
+        [string] $ApiCatalogPath,
+        [string[]] $ReferencePath = @()
     )
     Initialize-Roslyn
+    $script:ApiCatalog = if ($ApiCatalogPath) { Import-CS2PSApiCatalog -Path $ApiCatalogPath } else { $null }
+    $script:ApiCalls = [Collections.Generic.List[object]]::new()
     if ($Path) { $Source = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path).Path) }
 
     $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source)
@@ -34,6 +40,7 @@ function ConvertFrom-CSharp {
     foreach ($n in 'System.Private.CoreLib.dll', 'System.Runtime.dll', 'System.Collections.dll', 'System.Console.dll') {
         $refs.Add([Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile([IO.Path]::Combine($runtimeDir, $n)))
     }
+    foreach ($reference in $ReferencePath) { $refs.Add([Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile((Resolve-Path -LiteralPath $reference).Path)) }
     $options = [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::DynamicallyLinkedLibrary)
     $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create('CS2PS', [Microsoft.CodeAnalysis.SyntaxTree[]]@($tree), $refs, $options)
     $script:Model = $compilation.GetSemanticModel($tree)
@@ -313,7 +320,7 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
         $default = @($symbol.InstanceConstructors | Where-Object { $_.Parameters.Length -eq 0 })
         [pscustomobject]@{ Type = $symbol.ToString(); PowerShellType = Get-PsTypeName $symbol; HasDefaultConstructor = $default.Count -gt 0 }
     }
-    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings); Renames = $script:Renames.ToArray() }
+    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings); Renames = $script:Renames.ToArray(); ApiCalls = $script:ApiCalls.ToArray() }
 }
 
 function Initialize-Roslyn {
@@ -1094,7 +1101,10 @@ function Convert-Expression($e) {
                 $receiver = if ($sym.IsStatic) { '$null' } else { Convert-Expression $e.Expression.Expression }
                 $static = if ($sym.IsStatic) { '$true' } else { '$false' }
                 # Exact typed arguments are the best match for a unique reflected signature.
-                $direct = -not @($sym.Parameters | Where-Object { $_.IsParams -or $_.RefKind.ToString() -ne 'None' -or $_.Type.SpecialType.ToString() -in 'System_Object','System_String' -or $_.Type.IsRefLikeType }).Count
+                $policy = Get-CS2PSCallPolicy $sym
+                $inventory = if ($script:ApiCatalog) { @(Find-CS2PSApi -Catalog $script:ApiCatalog -AssemblyIdentity $sym.ContainingAssembly.Identity.ToString() -Id (Get-CS2PSApiId $sym) -Limit 2) } else { @() }
+                if ($script:ApiCatalog -and $inventory.Count -ne 1) { Add-Diagnostic $e 'selected API is absent or ambiguous in the exact toolchain catalog'; return '$null' }
+                $direct = $policy.Candidate -and (-not $script:ApiCatalog -or $inventory[0].Api.CallPolicy.Candidate)
                 $runtimeType = (Get-PsTypeName $sym.ContainingType) -as [type]
                 if ($direct -and $runtimeType) {
                     $parameterTypes = [type[]]@($sym.Parameters | ForEach-Object { (Get-PsTypeName $_.Type) -as [type] })
@@ -1102,6 +1112,7 @@ function Convert-Expression($e) {
                     $selected = $runtimeType.GetMethod($sym.Name, $flags, $null, $parameterTypes, $null)
                     $direct = $null -ne $selected
                 } else { $direct = $false }
+                $script:ApiCalls.Add([pscustomobject]@{Id=(Get-CS2PSApiId $sym); Assembly=$sym.ContainingAssembly.Identity.ToString(); Line=$e.GetLocation().GetLineSpan().StartLinePosition.Line+1; CatalogMatched=$inventory.Count -eq 1; Form=if ($direct) {'Direct'} else {'Reflection'}; Reasons=@($policy.Reasons); Semantics=if ($inventory.Count) {$inventory[0].Api.Semantics} else {'Unreviewed'}; Lowering='Unknown'})
                 if ($direct) {
                     $typedValues = for ($i = 0; $i -lt $values.Count; $i++) {
                         if ($e.ArgumentList.Arguments[$i].Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.LiteralExpressionSyntax] -and (Get-ExprType $e.ArgumentList.Arguments[$i].Expression).SpecialType -eq $sym.Parameters[$i].Type.SpecialType) { $values[$i] }

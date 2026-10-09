@@ -6,14 +6,16 @@ and uses Roslyn's semantic model to make every meaning difference explicit:
 
 | C# | PowerShell that would differ | What CS2PS emits |
 |---|---|---|
-| `a / b` on integers truncates | `$a / $b` returns a double | Exact integer division in `Invoke-CS2PSInteger`, with a typed result |
+| `a / b` on integers truncates | `$a / $b` returns a double | Typed inline `[Math]::DivRem(...).Item1` for signed int/long |
 | `(int)x` on a double truncates | `[int]$x` rounds half to even | Explicit checked conversion or .NET 9+ saturating truncation |
 | String equality is ordinal | Even case-sensitive cultural comparisons differ | Null-aware `[string]::Equals(..., Ordinal)` |
 | `"s" + n` concatenates | `+` may add numerically | `[string]::Concat(...)` |
 
-Static methods become advanced functions with typed parameters and
-`[OutputType]`; method names map to approved verbs (`FormatLabel` becomes
-`Format-<Class>Label`, `IsSame` becomes `Test-<Class>Same`). Anything outside
+Classes retain source names, fields and constructors. Eligible static and instance
+methods become typed class methods; static entrypoints also have approved-verb
+function forwarders (`FormatLabel` becomes `Format-<Class>FormatLabel`, `IsSame`
+becomes `Test-<Class>IsSame`). Ref/out and source value semantics can require
+explicit function fallbacks. Anything outside
 the supported subset is reported as a diagnostic with its line and marked in
 the output; nothing is guessed.
 
@@ -32,6 +34,14 @@ $r.Methods         # source methods, generated function names and parameter name
 ```
 
 ## Verification
+
+For toolchain-wide API discovery, run `tests/Test-IdiomaticOutput.ps1 -Mode ApiCatalog`.
+Query the generated dictionary with `-Mode ApiQuery -ApiPattern '*Newtonsoft.Json*'`.
+The optional `ConvertFrom-CSharp -ApiCatalogPath <manifest>` checks external call
+sites against exact assembly-qualified declarations and exposes `ApiCalls` evidence.
+See [API-CATALOG.md](docs/API-CATALOG.md) for scope, invocations and primary sources.
+Generated catalogs remain in ignored `build/`; catalog membership does not imply
+semantic parity, platform portability or PSLowering admission.
 
 `tests/Test-Parity.ps1` translates a fixture, compiles the same C# with Roslyn
 into the ignored `build/` folder as a comparison only, calls both with the
@@ -55,14 +65,14 @@ cover boundary behavior.
 
 | C# | PowerShell difference | Explicit translation |
 |---|---|---|
-| Distinct symbols, including `value`/`Value` | Names ignore case; automatic variables can collide | Syntax-position symbol names (`v123`) |
+| Distinct symbols, including `value`/`Value` | Names ignore case; automatic variables can collide | Preserve names; readable suffixes only for collisions (`value_2`) |
 | Array/List indexing | Negative indices count backward; array misses return null | Bounds/null checks and the C# exception type |
 | `foreach` over `List<T>` | Collection mutation may go undetected | Real .NET enumerator with disposal in `finally` |
 | `return` of an array | The pipeline enumerates it | Unary comma preserves the array, including empty/singleton arrays |
 | Expression statements | Method/assignment results can enter the pipeline | `[void]` suppresses incidental output |
 | `switch` statements/expressions | PowerShell matching ignores case and enumerates inputs | Evaluate once, ordinal constant tests, first matching arm |
 | `continue` inside a switch | PowerShell can continue the switch | Label the actual enclosing C# loop |
-| Null strings | A typed PowerShell string becomes empty | Preserve null in object storage |
+| Null strings | A typed PowerShell string becomes empty | Object storage where null identity is observable; string storage where proven safe |
 | Simple class fields and methods | Case-insensitive members and function dispatch differ | Symbol-named fields, constructor factories and explicit receiver functions |
 | Class assignment | Objects must retain shared identity | Preserve the same object reference; null receivers throw |
 | Simple struct assignment, parameters and returns | PowerShell classes have reference semantics | Explicit copies at value boundaries; nested value fields copy, reference fields remain shared |
