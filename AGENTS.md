@@ -17,6 +17,9 @@
   assembly roots. Use exact assembly/declaration identities; inventory membership
   is not proof of behavior, runtime binding, portability or lowering admission.
   Resolve documented questions before adding execution tracing.
+- Call emission rules and their compiler-source evidence live in
+  docs/CALL-CORRESPONDENCE.md. Use the existing CallMatrix acceptance mode;
+  catalog membership alone must not select an emission form.
 - Every supported construct carries parity cases: the translated PowerShell
   and the Roslyn-compiled original are called with the same inputs and must
   agree. A construct without parity cases is not supported.

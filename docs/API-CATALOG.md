@@ -72,8 +72,10 @@ the same call-policy function, and does not require a generated catalog.
 
 A call-policy `Candidate=true` is not a universal binder proof. The current conservative
 policy still requires a runtime-resolvable exact signature at the call site and
-retains explicit handling for object/string/null, params, ref/out, generic and
-ref-like cases. Existing dedicated emission rules remain in control. Catalog
+delegates call-site decisions to the compiler-informed rules in
+`src/SemanticCorrespondence.ps1`, documented in [CALL-CORRESPONDENCE.md](CALL-CORRESPONDENCE.md).
+Object arguments can use explicit casts; nullable strings, params, ref/out,
+generic and ref-like cases still require their respective semantic checks. Catalog
 membership does not expand the supported C# subset.
 
 Behavioral contracts are marked `Unreviewed` and lowering support `Unknown` unless

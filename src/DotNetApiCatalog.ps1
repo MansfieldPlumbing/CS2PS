@@ -14,7 +14,7 @@ function Get-CS2PSApiAttributes($Symbol) {
 }
 
 function Get-CS2PSCallPolicy($Method) {
-    # This describes the existing conservative emission rule, not a blanket binder proof.
+    # Inventory hints only. Call-site correspondence, not Candidate, selects emission.
     $reasons = [Collections.Generic.List[string]]::new()
     if ($Method.IsGenericMethod) { $reasons.Add('Generic method requires an admitted generic invocation rule.') }
     if ($Method.ReturnsByRef -or $Method.ReturnsByRefReadonly) { $reasons.Add('By-reference return requires an explicit representation.') }

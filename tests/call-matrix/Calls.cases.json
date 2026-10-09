@@ -1,0 +1,18 @@
+[
+  {"Type":"CallMappings","Method":"BoxedText","Arguments":[null]},
+  {"Type":"CallMappings","Method":"BoxedText","Arguments":[""]},
+  {"Type":"CallMappings","Method":"BoxedText","Arguments":["text"]},
+  {"Type":"CallMappings","Method":"BoxedText","Arguments":[42]},
+  {"Type":"CallMappings","Method":"BoxedText","Arguments":[1.25]},
+  {"Type":"CallMappings","Method":"Format","Arguments":[null]},
+  {"Type":"CallMappings","Method":"Format","Arguments":[""]},
+  {"Type":"CallMappings","Method":"Format","Arguments":["text"]},
+  {"Type":"CallMappings","Method":"Format","Arguments":[42]},
+  {"Type":"CallMappings","Method":"Format","Arguments":[1.25]},
+  {"Type":"CallMappings","Method":"Parse","Arguments":[null]},
+  {"Type":"CallMappings","Method":"Parse","Arguments":[""]},
+  {"Type":"CallMappings","Method":"Parse","Arguments":["42"]},
+  {"Type":"CallMappings","Method":"Once","Arguments":[]},
+  {"Type":"CallMappings","Method":"Write","Arguments":[null]},
+  {"Type":"CallMappings","Method":"Write","Arguments":[1.25]}
+]

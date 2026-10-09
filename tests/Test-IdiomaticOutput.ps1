@@ -1,7 +1,8 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery')] [string] $Mode = 'Verify',
+    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix')] [string] $Mode = 'Verify',
+    [switch] $CaptureCallBaseline,
     [string] $ApiCatalogPath,
     [string] $ApiPattern = 'M:System.String.Substring*',
     [string] $ApiAssembly,
@@ -97,6 +98,123 @@ function Import-PinnedLowering {
     if ($integrity.Commit -cne $pin) { throw 'PSLowering integrity revision mismatch.' }
     foreach ($record in $integrity.Files) { if ((Get-FileHash -LiteralPath (Join-Path $cache $record.Path)).Hash -cne $record.SHA256) { throw "PSLowering digest mismatch: $($record.Path)" } }
     Import-Module (Join-Path $cache 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1') -Force -Global
+}
+if ($Mode -eq 'CallMatrix') {
+    if (-not $ApiCatalogPath) { $ApiCatalogPath = (Get-Content -Raw -LiteralPath (Join-Path $build 'api-catalog/current.json') | ConvertFrom-Json).ManifestPath }
+    $directory = Join-Path $build 'call-matrix'
+    $null = [IO.Directory]::CreateDirectory($directory)
+    $path = Join-Path $directory $(if ($CaptureCallBaseline) {'baseline.json'} else {'current.json'})
+    if ($CaptureCallBaseline -and (Test-Path -LiteralPath $path)) { throw 'Call baseline already exists.' }
+    if (-not $CaptureCallBaseline -and -not (Test-Path -LiteralPath (Join-Path $directory 'baseline.json'))) {
+        & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File $PSCommandPath -Mode CallMatrix -CaptureCallBaseline -ApiCatalogPath $ApiCatalogPath
+        if ($LASTEXITCODE) { throw 'Unable to reconstruct the pinned call baseline.' }
+    }
+    if ($CaptureCallBaseline) {
+        $baselineCommit = '4d8433c6725b1499ff5a2d604eee9fc4fc31a96d'
+        $baselineDirectory = Join-Path $directory 'baseline-source'
+        foreach ($name in 'ConvertFrom-CSharp.ps1','DotNetApiCatalog.ps1') {
+            $text = @(& git -C $root show "${baselineCommit}:src/$name")
+            if ($LASTEXITCODE) { throw "Baseline source unavailable: $baselineCommit $name" }
+            Save-Text (Join-Path $baselineDirectory $name) (($text -join "`n") + "`n")
+        }
+        . (Join-Path $baselineDirectory 'ConvertFrom-CSharp.ps1')
+    }
+    $records = [Collections.Generic.List[object]]::new()
+    $sourceInvocationCount = 0
+    $admission = [Collections.Generic.List[object]]::new()
+    if (-not $CaptureCallBaseline) { Import-PinnedLowering }
+    foreach ($fixture in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'fixtures') -Filter '*.cs' | Sort-Object Name) {
+        $result = ConvertFrom-CSharp -Path $fixture.FullName -ApiCatalogPath $ApiCatalogPath
+        $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($call in $result.ApiCalls) { [void]$ids.Add($call.Id) }
+        $expectedSpans = @(
+            foreach ($node in $script:Model.SyntaxTree.GetRoot().DescendantNodes()) {
+                if ($node -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax]) { continue }
+                $symbol = $script:Model.GetSymbolInfo($node).Symbol
+                if ($symbol -and $ids.Contains((Get-CS2PSApiId $symbol))) { "$($node.Span.Start):$($node.Span.Length)" }
+            }
+        )
+        $sourceInvocationCount += $expectedSpans.Count
+        if (-not $CaptureCallBaseline) {
+            $emittedSpans = @($result.ApiCalls | ForEach-Object { "$($_.SourceStart):$($_.SourceLength)" })
+            if ($expectedSpans.Count -ne $emittedSpans.Count -or ($expectedSpans.Count -and (Compare-Object $expectedSpans $emittedSpans))) { throw "Invocation span coverage mismatch: $($fixture.Name)" }
+        }
+        foreach ($call in $result.ApiCalls) { $records.Add(@{Fixture=$fixture.Name;Call=$call}) }
+        if ($CaptureCallBaseline) { Save-Text (Join-Path $directory ($fixture.BaseName + '.before.ps1')) $result.PowerShell }
+        else {
+            $output = Join-Path $directory ($fixture.BaseName + '.ps1')
+            Save-Text $output $result.PowerShell
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($output,[ref]$tokens,[ref]$errors)
+            if ($errors.Count) { throw "Generated call-matrix parse failed: $($fixture.Name): $($errors[0])" }
+            if ($fixture.BaseName -in 'ProgressLayout','ClassBoundaries','FormatBoundaries','Checked') {
+                $golden = Join-Path $PSScriptRoot ('golden/' + $fixture.BaseName + '.ps1')
+                if ([IO.File]::ReadAllText($golden) -cne $result.PowerShell) { throw "Call-matrix golden mismatch: $($fixture.Name)" }
+            }
+            foreach ($method in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionMemberAst] -and -not $node.IsConstructor},$true)) {
+                try { $null = ConvertTo-TypedExpression -MethodAst $method; $status='Admitted'; $reason='' } catch { $status='Rejected'; $reason=$_.Exception.Message }
+                $admission.Add(@{Fixture=$fixture.Name;Method=$method.Name;Line=$method.Extent.StartLineNumber;Status=$status;Reason=$reason})
+            }
+            foreach ($method in $result.Methods | Where-Object { -not $_.ClassMethod }) {
+                $admission.Add(@{Fixture=$fixture.Name;Method=$method.Function;Line=0;Status='Rejected';Reason='Pinned admission accepts FunctionMemberAst; this entrypoint requires function semantics.'})
+            }
+        }
+    }
+    if ($CaptureCallBaseline) {
+        Save-Text $path (@{Commit=$baselineCommit;SourceInvocations=$sourceInvocationCount;Sites=@($records);Count=$records.Count} | ConvertTo-Json -Depth 10)
+        return
+    }
+    $baseline = Get-Content -Raw -LiteralPath (Join-Path $directory 'baseline.json') | ConvertFrom-Json
+    $oldKeys = @($baseline.Sites | ForEach-Object { "$($_.Fixture):$($_.Call.Line):$($_.Call.Id)" } | Sort-Object -Unique)
+    $newKeys = @($records | ForEach-Object { "$($_.Fixture):$($_.Call.Line):$($_.Call.Id)" } | Sort-Object -Unique)
+    if ($baseline.Count -ne 78 -or $records.Count -ne 75 -or $sourceInvocationCount -ne 75 -or (Compare-Object $oldKeys $newKeys)) { throw 'The original invocation corpus changed.' }
+    $sourceKeys = @($records | ForEach-Object { "$($_.Fixture):$($_.Call.SourceStart):$($_.Call.SourceLength)" } | Sort-Object -Unique)
+    if ($sourceKeys.Count -ne $records.Count) { throw 'Duplicate source invocation records.' }
+    $parity = [Collections.Generic.List[object]]::new()
+    $jsonFixture = Join-Path $directory 'JsonApi.cs'
+    Save-Text $jsonFixture 'public static class JsonApi { public static string Serialize(int value) => Newtonsoft.Json.JsonConvert.SerializeObject(value); }'
+    Save-Text (Join-Path $directory 'JsonApi.cases.json') (@(0,-1,42,[int]::MinValue,[int]::MaxValue | ForEach-Object { @{Type='JsonApi';Method='Serialize';Arguments=@($_)} }) | ConvertTo-Json -Depth 5)
+    $jsonReference = Join-Path $PSHOME 'Newtonsoft.Json.dll'
+    $jsonTranslation = ConvertFrom-CSharp -Path $jsonFixture -ReferencePath $jsonReference -ApiCatalogPath $ApiCatalogPath
+    Save-Text (Join-Path $directory 'JsonApi.ps1') $jsonTranslation.PowerShell
+    if ($jsonTranslation.ApiCalls.Count -ne 1 -or $jsonTranslation.ApiCalls[0].Outcome -ne 'Direct' -or $jsonTranslation.PowerShell -match 'Invoke-CS2PSRuntime|SerializeObject\(\[object\]') { throw 'Discovered Json.NET call did not use the unambiguous direct-call rule.' }
+    foreach ($culture in 'en-US','fr-FR') {
+        $total = 0
+        foreach ($suite in @(
+            @{Name='Fixtures';Arguments=@();Expected=264},
+            @{Name='Json.NET';Arguments=@('-Fixture',$jsonFixture,'-ReferencePath',$jsonReference);Expected=5},
+            @{Name='Call mappings';Arguments=@('-Fixture',(Join-Path $PSScriptRoot 'call-matrix/Calls.cs'));Expected=16}
+        )) {
+            $arguments = $suite.Arguments
+            $log = @(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Culture $culture -ApiCatalogPath $ApiCatalogPath @arguments)
+            if ($LASTEXITCODE) { throw "Call-matrix parity failed: $culture $($suite.Name); $($log -join '; ')" }
+            $summary = @($log | Where-Object { $_ -match '^calls ([0-9]+), differences ([0-9]+)$' })[-1]
+            if ($summary -notmatch '^calls ([0-9]+), differences 0$' -or [int]$Matches[1] -ne $suite.Expected) { throw "Unexpected parity count: $summary" }
+            $total += $suite.Expected
+            $parity.Add(@{Culture=$culture;Suite=$suite.Name;Calls=$suite.Expected;Differences=0})
+        }
+        "$culture`: $total calls, 0 differences (269 existing + 16 binding regressions)"
+    }
+    & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Diagnostics.ps1')
+    if ($LASTEXITCODE) { throw 'Diagnostic suite failed.' }
+    $counts = [ordered]@{}
+    foreach ($outcome in 'Direct','Adapted','Exact fallback','Unsupported') { $counts[$outcome] = @($records | Where-Object {$_.Call.Outcome -eq $outcome}).Count }
+    $receipt = @{Sites=@($records);Count=$records.Count;Outcomes=$counts;BaselineDirect=@($baseline.Sites | Where-Object {$_.Call.Form -eq 'Direct'}).Count;BaselineReflection=@($baseline.Sites | Where-Object {$_.Call.Form -eq 'Reflection'}).Count;Parity=@($parity);Admission=@($admission);AdditionalJsonCall=@($jsonTranslation.ApiCalls);PowerShell=$PSVersionTable.PSVersion.ToString();SMA=[Management.Automation.PSObject].Assembly.GetCustomAttributes([Reflection.AssemblyInformationalVersionAttribute],$false)[0].InformationalVersion;CoreLib=[object].Assembly.GetCustomAttributes([Reflection.AssemblyInformationalVersionAttribute],$false)[0].InformationalVersion;PSLowering='1afabe056235a570da29e268824784557d4f6cdd';GoldenFiles=4;ParsedFixtures=30}
+    $receipt.SourceInvocations = $sourceInvocationCount
+    $receipt.BaselineCommit = '4d8433c6725b1499ff5a2d604eee9fc4fc31a96d'
+    $beforeBySource = @(foreach ($record in $records) {
+        @($baseline.Sites | Where-Object {$_.Fixture -ceq $record.Fixture -and $_.Call.Line -eq $record.Call.Line -and $_.Call.Id -ceq $record.Call.Id})[0].Call.Form
+    })
+    $receipt.BaselineSourceDirect = @($beforeBySource | Where-Object {$_ -eq 'Direct'}).Count
+    $receipt.BaselineSourceReflection = @($beforeBySource | Where-Object {$_ -eq 'Reflection'}).Count
+    Save-Text $path ($receipt | ConvertTo-Json -Depth 12)
+    "Historical records before: $($receipt.BaselineDirect) direct, $($receipt.BaselineReflection) reflection"
+    "Source sites before: $($receipt.BaselineSourceDirect) direct, $($receipt.BaselineSourceReflection) reflection"
+    "Source invocations: $($records.Count); historical baseline included 3 duplicate visits"
+    foreach ($outcome in $counts.Keys) { "$outcome`: $($counts[$outcome])" }
+    "Lowering: $(@($admission | Where-Object Status -eq 'Admitted').Count) admitted, $(@($admission | Where-Object Status -eq 'Rejected').Count) rejected; reasons in $path"
+    foreach ($record in $records | Where-Object {$_.Call.Outcome -eq 'Exact fallback'}) { "$($record.Fixture):$($record.Call.Line): $($record.Call.Reasons -join ' ')" }
+    return
 }
 if ($Mode -eq 'Baseline') {
     $source = & git -C $root show '8c78f1b:src/ConvertFrom-CSharp.ps1'
@@ -203,8 +321,9 @@ foreach ($fixture in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'fixtur
     $golden = Join-Path $PSScriptRoot ('golden/' + $fixture.BaseName + '.ps1')
     if ($fixture.BaseName -in $goldenNames) {
         if ($Mode -eq 'Golden') {
-            if ([IO.File]::Exists($golden)) { throw "Golden already exists; review before replacement: $golden" }
-            Save-Text $golden $result.PowerShell
+            if ([IO.File]::Exists($golden)) {
+                if ([IO.File]::ReadAllText($golden) -cne $result.PowerShell) { throw "Golden already exists; review before replacement: $golden" }
+            } else { Save-Text $golden $result.PowerShell }
         } elseif (-not [IO.File]::Exists($golden) -or [IO.File]::ReadAllText($golden) -cne $result.PowerShell) { throw "Golden mismatch: $($fixture.Name)" }
     }
     $ratio = $codeLines.Count / $sourceLines

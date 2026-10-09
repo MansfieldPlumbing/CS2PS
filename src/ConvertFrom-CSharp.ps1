@@ -19,6 +19,7 @@
     An object with the generated PowerShell text and its diagnostics.
 #>
 . (Join-Path $PSScriptRoot 'DotNetApiCatalog.ps1')
+. (Join-Path $PSScriptRoot 'SemanticCorrespondence.ps1')
 
 function ConvertFrom-CSharp {
     [CmdletBinding()]
@@ -1041,7 +1042,6 @@ function Convert-Expression($e) {
             return "[$(Get-PsTypeName (Get-ExprType $e))]::new($(($e.ArgumentList.Arguments | ForEach-Object { Convert-Expression $_.Expression }) -join ', '))"
         }
         'InvocationExpressionSyntax' {
-            $args_ = ($e.ArgumentList.Arguments | ForEach-Object { Convert-Argument $_ }) -join ', '
             $sym = $script:Model.GetSymbolInfo($e).Symbol
             if ($sym.ReducedFrom) { Add-Diagnostic $e 'reduced extension method invocation'; return '$null' }
             if (Test-Nullable $sym.ContainingType) {
@@ -1098,30 +1098,16 @@ function Convert-Expression($e) {
                     }
                 }
                 if ($values.Count -ne $sym.Parameters.Length) { Add-Diagnostic $e 'optional runtime arguments'; return '$null' }
-                $receiver = if ($sym.IsStatic) { '$null' } else { Convert-Expression $e.Expression.Expression }
                 $static = if ($sym.IsStatic) { '$true' } else { '$false' }
-                # Exact typed arguments are the best match for a unique reflected signature.
-                $policy = Get-CS2PSCallPolicy $sym
+                # The catalog establishes identity; the correspondence rule decides emission.
                 $inventory = if ($script:ApiCatalog) { @(Find-CS2PSApi -Catalog $script:ApiCatalog -AssemblyIdentity $sym.ContainingAssembly.Identity.ToString() -Id (Get-CS2PSApiId $sym) -Limit 2) } else { @() }
                 if ($script:ApiCatalog -and $inventory.Count -ne 1) { Add-Diagnostic $e 'selected API is absent or ambiguous in the exact toolchain catalog'; return '$null' }
-                $direct = $policy.Candidate -and (-not $script:ApiCatalog -or $inventory[0].Api.CallPolicy.Candidate)
-                $runtimeType = (Get-PsTypeName $sym.ContainingType) -as [type]
-                if ($direct -and $runtimeType) {
-                    $parameterTypes = [type[]]@($sym.Parameters | ForEach-Object { (Get-PsTypeName $_.Type) -as [type] })
-                    $flags = if ($sym.IsStatic) { [Reflection.BindingFlags]'Public,Static' } else { [Reflection.BindingFlags]'Public,Instance' }
-                    $selected = $runtimeType.GetMethod($sym.Name, $flags, $null, $parameterTypes, $null)
-                    $direct = $null -ne $selected
-                } else { $direct = $false }
-                $script:ApiCalls.Add([pscustomobject]@{Id=(Get-CS2PSApiId $sym); Assembly=$sym.ContainingAssembly.Identity.ToString(); Line=$e.GetLocation().GetLineSpan().StartLinePosition.Line+1; CatalogMatched=$inventory.Count -eq 1; Form=if ($direct) {'Direct'} else {'Reflection'}; Reasons=@($policy.Reasons); Semantics=if ($inventory.Count) {$inventory[0].Api.Semantics} else {'Unreviewed'}; Lowering='Unknown'})
-                if ($direct) {
-                    $typedValues = for ($i = 0; $i -lt $values.Count; $i++) {
-                        if ($e.ArgumentList.Arguments[$i].Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.LiteralExpressionSyntax] -and (Get-ExprType $e.ArgumentList.Arguments[$i].Expression).SpecialType -eq $sym.Parameters[$i].Type.SpecialType) { $values[$i] }
-                        else { "[$(Get-PsTypeName $sym.Parameters[$i].Type)]($($values[$i]))" }
-                    }
-                    $target = if ($sym.IsStatic) { "[$(Get-PsTypeName $sym.ContainingType)]::" } else { "$(Convert-Receiver $e.Expression.Expression)." }
-                    return "$target$($sym.Name)($($typedValues -join ', '))"
-                }
-                return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static) <# Reflection preserves the selected object/null, ref or expanded params signature. #>"
+                $mapping = Get-CS2PSInvocationCorrespondence $sym $e $values
+                $direct = $mapping.Outcome -ne 'Exact fallback'
+                $script:ApiCalls.Add([pscustomobject]@{Id=(Get-CS2PSApiId $sym); Assembly=$sym.ContainingAssembly.Identity.ToString(); Line=$e.GetLocation().GetLineSpan().StartLinePosition.Line+1; SourceStart=$e.Span.Start; SourceLength=$e.Span.Length; CatalogMatched=$inventory.Count -eq 1; Form=if ($direct) {'Direct'} else {'Reflection'}; Outcome=$mapping.Outcome; Rule=$mapping.Rule; Casts=$mapping.Casts; SelectedSignature=$mapping.SelectedSignature; Evidence=$mapping.Evidence; Reasons=@($mapping.Reasons); Semantics=if ($inventory.Count) {$inventory[0].Api.Semantics} else {'Unreviewed'}; Lowering='Unknown'})
+                if ($direct) { return Write-CS2PSInvocationAst $mapping.Ast }
+                $receiver = if ($sym.IsStatic) { '$null' } else { Convert-Expression $e.Expression.Expression }
+                return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static) <# $($mapping.Reasons -join ' ') #>"
             }
             Add-Diagnostic $e 'unsupported invocation form'; return '$null'
         }
