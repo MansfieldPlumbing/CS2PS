@@ -908,7 +908,24 @@ function Convert-Expression($e) {
                 if ($values.Count -ne $sym.Parameters.Length) { Add-Diagnostic $e 'optional runtime arguments'; return '$null' }
                 $receiver = if ($sym.IsStatic) { '$null' } else { Convert-Expression $e.Expression.Expression }
                 $static = if ($sym.IsStatic) { '$true' } else { '$false' }
-                return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static)"
+                # Exact typed arguments are the best match for a unique reflected signature.
+                $direct = -not @($sym.Parameters | Where-Object { $_.IsParams -or $_.RefKind.ToString() -ne 'None' -or $_.Type.SpecialType.ToString() -in 'System_Object','System_String' -or $_.Type.IsRefLikeType }).Count
+                $runtimeType = (Get-PsTypeName $sym.ContainingType) -as [type]
+                if ($direct -and $runtimeType) {
+                    $parameterTypes = [type[]]@($sym.Parameters | ForEach-Object { (Get-PsTypeName $_.Type) -as [type] })
+                    $flags = if ($sym.IsStatic) { [Reflection.BindingFlags]'Public,Static' } else { [Reflection.BindingFlags]'Public,Instance' }
+                    $selected = $runtimeType.GetMethod($sym.Name, $flags, $null, $parameterTypes, $null)
+                    $direct = $null -ne $selected
+                } else { $direct = $false }
+                if ($direct) {
+                    $typedValues = for ($i = 0; $i -lt $values.Count; $i++) {
+                        if ($e.ArgumentList.Arguments[$i].Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.LiteralExpressionSyntax] -and (Get-ExprType $e.ArgumentList.Arguments[$i].Expression).SpecialType -eq $sym.Parameters[$i].Type.SpecialType) { $values[$i] }
+                        else { "[$(Get-PsTypeName $sym.Parameters[$i].Type)]($($values[$i]))" }
+                    }
+                    $target = if ($sym.IsStatic) { "[$(Get-PsTypeName $sym.ContainingType)]::" } else { "(Get-CS2PSReceiver ($receiver))." }
+                    return "$target$($sym.Name)($($typedValues -join ', '))"
+                }
+                return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static) <# Reflection preserves the selected object/null, ref or expanded params signature. #>"
             }
             Add-Diagnostic $e 'unsupported invocation form'; return '$null'
         }
