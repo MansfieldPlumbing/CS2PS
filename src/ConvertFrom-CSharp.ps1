@@ -41,6 +41,9 @@ function ConvertFrom-CSharp {
     $script:Methods = [System.Collections.Generic.List[object]]::new()
     $script:SourceTypes = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
     $script:MethodNames = @{}
+    $script:Names = @{}
+    $script:NameScopes = @{}
+    $script:Renames = [Collections.Generic.List[object]]::new()
     $script:StructTypes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $script:UnitId = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Source))).Substring(0,12)
 
@@ -263,12 +266,13 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
     $usedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($type in $types) {
         $symbol = $script:Model.GetDeclaredSymbol($type)
-        $script:SourceTypes[$symbol.ToString()] = "CS2PS_$($script:UnitId)_t$($type.Span.Start)"
+        $script:SourceTypes[$symbol.ToString()] = Get-ReadableName $symbol 'types' $symbol.Name
         if ($symbol.TypeKind.ToString() -eq 'Struct') { [void]$script:StructTypes.Add($symbol.ToString()) }
         foreach ($m in $type.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] }) {
             $method = $script:Model.GetDeclaredSymbol($m)
             $name = Get-FunctionName $symbol.Name $method.Name ($method.ReturnType.SpecialType.ToString() -ne 'System_Void')
-            if (-not $usedNames.Add($name)) { $name += '_m' + $m.Span.Start; [void]$usedNames.Add($name) }
+            $original = $name; $suffix = 2
+            while (-not $usedNames.Add($name)) { $name = $original + '_' + $suffix; $suffix++ }
             $script:MethodNames[$m.Span.Start] = $name
         }
     }
@@ -289,7 +293,7 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
         $default = @($symbol.InstanceConstructors | Where-Object { $_.Parameters.Length -eq 0 })
         [pscustomobject]@{ Type = $symbol.ToString(); DefaultFactory = $(if ($default.Count) { Get-ConstructorFunction $default[0] } else { $null }) }
     }
-    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings) }
+    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings); Renames = $script:Renames.ToArray() }
 }
 
 function Initialize-Roslyn {
@@ -337,8 +341,28 @@ function Get-PsTypeName($typeSymbol) {
     $typeSymbol.ToString().TrimEnd('?')
 }
 
-# Syntax positions identify declared symbols, including shadowed and case-only names.
-function Get-VariableName($symbol) { 'v' + $symbol.DeclaringSyntaxReferences[0].Span.Start }
+function Get-ReadableName($symbol, [string] $scope, [string] $name, [switch] $Variable) {
+    $key = $symbol.Kind.ToString() + ':' + $symbol.DeclaringSyntaxReferences[0].Span.Start + ':' + $scope
+    if ($script:Names.ContainsKey($key)) { return $script:Names[$key] }
+    if (-not $script:NameScopes.ContainsKey($scope)) {
+        $script:NameScopes[$scope] = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        if ($Variable) {
+            foreach ($reserved in 'input','args','this','_','PSItem','true','false','null','error','host','PSHOME','HOME','PID','PWD','PSVersionTable','PSBoundParameters','PSCmdlet','MyInvocation','ExecutionContext','Matches','foreach','switch','self') {
+                [void]$script:NameScopes[$scope].Add($reserved)
+            }
+        }
+    }
+    $candidate = $name; $suffix = 2
+    while (-not $script:NameScopes[$scope].Add($candidate)) { $candidate = $name + '_' + $suffix; $suffix++ }
+    $script:Names[$key] = $candidate
+    if ($candidate -cne $name) {
+        $script:Renames.Add([pscustomobject]@{ Source = $name; Output = $candidate; Scope = $scope; Reason = 'PowerShell case-insensitive name or reserved variable collision' })
+    }
+    return $candidate
+}
+function Get-VariableName($symbol) {
+    Get-ReadableName $symbol ('variables:' + $symbol.ContainingSymbol.ToString()) $symbol.Name -Variable
+}
 function Get-StorageType($symbol) {
     if ((Test-String $symbol) -or (Test-Nullable $symbol)) { return 'object' } # Preserve null and boxed underlying values.
     Get-PsTypeName $symbol
@@ -369,11 +393,12 @@ function Convert-Value($expr) {
     }
     return $text
 }
-function Get-FieldName($symbol) { 'f' + $symbol.DeclaringSyntaxReferences[0].Span.Start }
+function Get-FieldName($symbol) { Get-ReadableName $symbol ('fields:' + $symbol.ContainingType.ToString()) $symbol.Name }
 function Get-MethodFunction($symbol) { $script:MethodNames[$symbol.DeclaringSyntaxReferences[0].Span.Start] }
 function Get-ConstructorFunction($symbol) {
-    $suffix = if ($symbol.DeclaringSyntaxReferences.Length) { $symbol.DeclaringSyntaxReferences[0].Span.Start } else { 'default' }
-    'New-' + (Get-PsTypeName $symbol.ContainingType) + '_' + $suffix
+    $overloads = @($symbol.ContainingType.InstanceConstructors)
+    $suffix = if ($overloads.Count -gt 1) { '_' + (1 + [Array]::IndexOf($overloads, $symbol)) } else { '' }
+    'New-' + (Get-PsTypeName $symbol.ContainingType) + $suffix
 }
 
 function Convert-TypeDeclaration($node) {
