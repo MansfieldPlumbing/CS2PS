@@ -1,5 +1,13 @@
 # CS2PS repository contract
 
+- GitHub Actions uses GitHub-hosted runners exclusively. Never expose the personal
+  workstation or Android devices through self-hosted runners, services, private
+  runner groups, tunnels, inbound ports or remotely triggered ADB/FastRPC access.
+  Keep verification permissions read-only, pin actions/dependencies, and retain
+  only sanitized scoped artifacts. Hardware checks unavailable on hosted runners
+  stay NOT RUN in CI and require a separately authorized local PowerShell command.
+  This boundary also applies to workflow_dispatch; preserve working hosted CI.
+
 - Read the shared mission at C:/Dev/Pwsh-Development/docs/mission/MISSION.md and relevant capability
   entries at C:/Dev/Pwsh-Development/docs/mission/CAPABILITY-MAP.md. CS2PS's immediate consumer purpose
   includes reusing C# Android binding/control logic in Pwsh. This context does

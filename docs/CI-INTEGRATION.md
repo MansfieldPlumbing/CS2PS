@@ -1,5 +1,46 @@
 # CI and ecosystem contracts
 
+## Hosted-only security boundary
+
+All automatic push, pull-request and scheduled jobs must use GitHub-hosted runners.
+Manual workflow_dispatch jobs must also remain hosted: manual dispatch is not local
+hardware authorization. The personal workstation and Android devices must never
+become runners or be connected to remotely triggered public workflows.
+Do not install/register runner services, use self-hosted labels or private runner
+groups targeting local machines, open inbound ports, or create tunnels to local
+Windows, phone, ADB or FastRPC endpoints. Preserve read-only verification tokens,
+immutable dependencies and narrow sanitized artifacts. Device credentials and
+signing secrets must not enter ordinary PR workflows. Preserve working hosted CI.
+
+Workflow definitions were audited on 2026-10-09 at CS2PS
+`f596ecc7d4ef232f0d0fb08642a361bb5720a9c1` and the other immutable revisions below:
+five workflows across CS2PS, PSLowering, QuickPS and JS2PS all target hosted Windows
+and declare contents: read. None specifies self-hosted runners, private runner
+groups, tunnels or local device commands. Pwsh and Kokoro-Hexagon have no committed
+workflows at their inspected revisions. This source audit does not certify future
+workflow changes or arbitrary third-party code. QuickPS and both JS2PS workflows
+still reference checkout@v7 rather than a full SHA; immutable action pinning remains
+a recorded gap in those repositories, whose files were not changed here.
+The repositories' Actions runner-registration APIs also reported zero self-hosted
+runners for each of the six repositories at audit time. Organization-wide runner
+registrations and local service inventories were not inspected.
+
+Hardware checks unavailable on hosted infrastructure are **NOT RUN** in CI.
+Run them only in a separately authorized local PowerShell session, never from a
+public PR, scheduled job or remote dispatch. For example, after locally staging
+Pwsh's lowering probe with tools/Build-LoweringProbe.ps1 and installing a reviewed
+debuggable Pwsh app, run this from the Pwsh checkout, substituting the explicitly
+approved device model:
+
+```powershell
+pwsh -NoProfile -File ./tools/Invoke-DeviceScript.ps1 `
+    -Path ./build/probes/lowering -Device '<approved device model>' -AliveSeconds 20
+```
+
+This command is provided for local execution only and was **NOT RUN** here.
+It verifies the staged managed probe; it does not verify Hexagon DSP behavior.
+Physical DSP tests remain separate locally authorized consumer gates.
+
 ## CS2PS authority and evidence
 
 `docs/OUTPUT-CONTRACT.md` defines the output boundary. CI uses the existing
@@ -86,7 +127,7 @@ Recommend required host checks in each owning repository for its existing
 deterministic/admission tests. Add managed composition to QuickPS only through
 its own change. Use scheduled/manual runs for pinned upstream provenance refresh,
 multi-repository pin compatibility and Android emulator startup/managed probes.
-Physical DSP/native audio receipts belong in manual device runs with explicit
+Physical DSP/native audio receipts belong in locally authorized device runs with explicit
 hardware identity retained privately. Do not place device credentials or signing
 keys in ordinary PR jobs. Use native reusable workflows only when duplication
 actually warrants it; no central orchestration service is needed.
