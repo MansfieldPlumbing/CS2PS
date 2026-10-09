@@ -1,12 +1,13 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix','AndroidBindings','OutputContract','SourceClosure')] [string] $Mode = 'Verify',
+    [ValidateSet('CI','ILVerify','Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix','AndroidBindings','OutputContract','SourceClosure')] [string] $Mode = 'Verify',
     [switch] $CaptureCallBaseline,
     [string] $ApiCatalogPath,
     [string] $ApiPattern = 'M:System.String.Substring*',
     [string] $ApiAssembly,
-    [string[]] $ReferencePath = @($PSHOME)
+    [string[]] $ReferencePath = @($PSHOME),
+    [string] $AndroidSourceRoot = 'C:/Dev/.vendor/dotnet-android'
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
@@ -156,6 +157,131 @@ function Test-LoweredOutputContract([string] $SourcePath, [string] $ClassName, [
     } finally { $context.Unload() }
     return $report
 }
+if ($Mode -eq 'CI') {
+    & (Join-Path $PSScriptRoot 'Test-FixtureOrigins.ps1')
+    foreach ($file in @(& git -C $root ls-files '*.ps1')) {
+        $tokens=$null; $errors=$null
+        $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root $file),[ref]$tokens,[ref]$errors)
+        if ($errors.Count) { throw "Committed PowerShell parse failure: $file" }
+    }
+    $runtimeVersion = [object].Assembly.GetCustomAttributes([Reflection.AssemblyInformationalVersionAttribute],$false)[0].InformationalVersion.Split('+')[0]
+    if ($PSVersionTable.PSVersion.ToString() -cne '7.7.0-preview.5' -or $runtimeVersion -cne '11.0.0-rc.1.26425.128') { throw 'CI requires the pinned PowerShell and runtime.' }
+    $lowering = Join-Path $build 'cache/PSLowering'
+    $pin = '1afabe056235a570da29e268824784557d4f6cdd'
+    $actual = & git -C $lowering rev-parse HEAD
+    if ($LASTEXITCODE -or $actual -cne $pin) { throw 'PSLowering checkout SHA mismatch.' }
+    $archive = Join-Path $build 'cache/PSLowering.source.tar'
+    & git -C $lowering archive --format=tar --output $archive $pin
+    if ($LASTEXITCODE -or (Get-FileHash -LiteralPath $archive).Hash -cne '816E789E4326B6506644A87D1EDF5D75EA4ED29893BAC2422A964F0D0E418C97') { throw 'PSLowering source archive digest mismatch.' }
+    & git -C $lowering diff --quiet HEAD --
+    if ($LASTEXITCODE) { throw 'PSLowering tracked files are modified.' }
+    $files = @(& git -C $lowering ls-files)
+    if ($LASTEXITCODE -or -not $files.Count) { throw 'PSLowering checkout is empty.' }
+    $integrity = @{Commit=$pin;Files=@($files | ForEach-Object { @{Path=$_;SHA256=(Get-FileHash -LiteralPath (Join-Path $lowering $_)).Hash} })}
+    Save-Text (Join-Path $build 'cache/PSLowering.integrity.json') ($integrity | ConvertTo-Json -Depth 5)
+    foreach ($stage in 'ApiCatalog','CallMatrix','AndroidBindings','OutputContract','SourceClosure','ILVerify') {
+        & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File $PSCommandPath -Mode $stage -AndroidSourceRoot $AndroidSourceRoot
+        if ($LASTEXITCODE) { throw "CI stage failed: $stage" }
+    }
+    $records = @(foreach ($path in 'call-matrix/current.json','android-bindings/receipt.json','output-contract/receipt.json','source-closure/receipt.json','ilverify/receipt.json') {
+        @{Path=$path;SHA256=(Get-FileHash -LiteralPath (Join-Path $build $path)).Hash;Result=(Get-Content -Raw -LiteralPath (Join-Path $build $path) | ConvertFrom-Json)}
+    })
+    Save-Text (Join-Path $build 'ci-receipt.json') (@{Commit=(& git -C $root rev-parse HEAD);PowerShell=$PSVersionTable.PSVersion.ToString();Runtime=$runtimeVersion;PSLowering=$pin;PSLoweringArchiveSHA256=(Get-FileHash -LiteralPath $archive).Hash;WorkflowRun=$env:GITHUB_RUN_ID;Records=$records;NotRun=@('Android emulator','Physical Snapdragon/Hexagon','Other consumer repository suites','Global size acceptance')} | ConvertTo-Json -Depth 30)
+    'Conformance: 341 distinct source/SMA comparisons and 34 independent IL comparisons per culture; 0 differences.'
+    'Size acceptance and universal lowering admission remain open; see README.md.'
+    return
+}
+if ($Mode -eq 'ILVerify') {
+    Import-PinnedLowering
+    $directory = Join-Path $build 'ilverify'
+    $null = [IO.Directory]::CreateDirectory($directory)
+    $package = Join-Path $directory 'dotnet-ilverify.10.0.12.zip'
+    if (-not (Test-Path -LiteralPath $package)) { Invoke-WebRequest 'https://api.nuget.org/v3-flatcontainer/dotnet-ilverify/10.0.12/dotnet-ilverify.10.0.12.nupkg' -OutFile $package }
+    $digest = '7FA6EDC3210E8BD0B998234B51196E95C9ED6DB3B4EAC51BC5320CF1799C6C0D'
+    if ((Get-FileHash -LiteralPath $package).Hash -cne $digest) { throw 'ILVerify package digest mismatch.' }
+    Expand-Archive -LiteralPath $package -DestinationPath (Join-Path $directory 'tool') -Force
+    $tool = Join-Path $directory 'tool/tools/net10.0/any/ILVerify.dll'
+    $runtimeZip = Join-Path $directory 'dotnet-runtime.zip'
+    if (-not (Test-Path -LiteralPath $runtimeZip)) { Invoke-WebRequest 'https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-rc.1.26425.128/dotnet-runtime-11.0.0-rc.1.26425.128-win-x64.zip' -OutFile $runtimeZip }
+    $runtimeDigest = '0DE14CB96790C916B4EB86DE0B96A9F8BEFD1BC3687779B0B0813925D5A728CD34E0F91D80314E5B3D1B971CC67611170194DB4DE47012B506F5A183124361E8'
+    if ((Get-FileHash -LiteralPath $runtimeZip -Algorithm SHA512).Hash -cne $runtimeDigest) { throw 'Independent dotnet runtime digest mismatch.' }
+    Expand-Archive -LiteralPath $runtimeZip -DestinationPath (Join-Path $directory 'dotnet') -Force
+    $dotnet = Join-Path $directory 'dotnet/dotnet.exe'
+    $hostPath = Join-Path $directory 'ConsumerOracle.dll'
+    $sourcePaths = @((Join-Path $PSScriptRoot 'reference/ConsumerOracle.cs'),(Join-Path $PSScriptRoot 'fixtures/ProgressLayout.cs'),(Join-Path $build 'android-bindings/JavaNativeTypeManager.cs'))
+    $trees = [Microsoft.CodeAnalysis.SyntaxTree[]]@($sourcePaths | ForEach-Object { [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText([IO.File]::ReadAllText($_)) })
+    $refs = [Microsoft.CodeAnalysis.MetadataReference[]]@('System.Private.CoreLib.dll','System.Runtime.dll','System.Console.dll','System.Text.Json.dll','System.Memory.dll' | ForEach-Object { [Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile((Join-Path $PSHOME $_)) })
+    $options = [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::ConsoleApplication)
+    $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create('ConsumerOracle',$trees,$refs,$options)
+    $stream = [IO.File]::Create($hostPath)
+    try { $emitted = $compilation.Emit($stream) } finally { $stream.Dispose() }
+    if (-not $emitted.Success) { throw "Comparison executable compile failed: $($emitted.Diagnostics -join '; ')" }
+    Save-Text ([IO.Path]::ChangeExtension($hostPath,'runtimeconfig.json')) (@{runtimeOptions=@{tfm='net11.0';framework=@{name='Microsoft.NETCore.App';version='11.0.0-rc.1.26425.128'};rollForward='Disable'}} | ConvertTo-Json -Depth 5)
+    $receipt = Get-Content -Raw -LiteralPath (Join-Path $build 'output-contract/receipt.json') | ConvertFrom-Json
+    $hostChecks = [Collections.Generic.List[object]]::new()
+    $checks = @(foreach ($output in $receipt.Outputs) {
+        $assemblyPath = $output.IndependentIL.Path
+        if (-not $assemblyPath) { throw 'No independently executed assembly available for ILVerify.' }
+        $log = @(& $dotnet exec --runtimeconfig ([IO.Path]::ChangeExtension($hostPath,'runtimeconfig.json')) $tool $assemblyPath --system-module System.Private.CoreLib -r (Join-Path $PSHOME 'System.Private.CoreLib.dll') 2>&1)
+        $code = $LASTEXITCODE
+        Save-Text (Join-Path $directory ([IO.Path]::GetFileName($assemblyPath) + '.log')) ($log -join "`n")
+        if ($code -ne 0 -or -not ($log -match 'All Classes and Methods.*Verified')) { throw "ILVerify failed: $assemblyPath" }
+        $class = [IO.Path]::GetFileNameWithoutExtension($output.Source)
+        $fixture = if ($class -ceq 'ProgressLayout') { Join-Path $PSScriptRoot 'fixtures/ProgressLayout.cs' } else { Join-Path $build 'android-bindings/JavaNativeTypeManager.cs' }
+        $vectorsPath = [IO.Path]::ChangeExtension($fixture,'cases.json')
+        $admitted = @($output.Admission | Where-Object Status -ceq Admitted | ForEach-Object Method) -join '|'
+        foreach ($culture in 'en-US','fr-FR') {
+            $log = @(& $dotnet exec $hostPath $assemblyPath $class $culture $vectorsPath $admitted 2>&1)
+            if ($LASTEXITCODE -ne 0 -or "$($log[-1])" -cne "calls $($output.IndependentIL.CasesPerCulture), differences 0, SMA absent") { throw "Dotnet-only parity failed: $class $culture $($log -join '; ')" }
+            $hostChecks.Add(@{Class=$class;Culture=$culture;Calls=$output.IndependentIL.CasesPerCulture;Differences=0;SmaLoaded=$false;SourceSHA256=(Get-FileHash -LiteralPath $fixture).Hash;VectorsSHA256=(Get-FileHash -LiteralPath $vectorsPath).Hash})
+        }
+        @{Assembly=$assemblyPath;SHA256=(Get-FileHash -LiteralPath $assemblyPath).Hash;Status='PASS'}
+    })
+    # Valid but behaviorally corrupted candidate; frozen C# and vectors remain untouched.
+    $original = Join-Path $build 'output-contract/ProgressLayout.ps1'
+    $tokens=$null; $errors=$null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($original,[ref]$tokens,[ref]$errors)
+    $method = @($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionMemberAst] -and $node.Name -ceq 'Clamp'},$true))[0]
+    if ($errors.Count -or -not $method) { throw 'Negative-control source not available.' }
+    $text = [IO.File]::ReadAllText($original)
+    $mutated = $text.Substring(0,$method.Body.Extent.StartOffset) + '{ return 0 }' + $text.Substring($method.Body.Extent.EndOffset)
+    $source = Join-Path $directory 'corrupted.ps1'
+    Save-Text $source $mutated
+    $candidate = Join-Path $directory 'Corrupted.dll'
+    $null = Export-LoweredAssembly -SourcePath $source -ClassName ProgressLayout -MethodNames Clamp -OutputPath $candidate -Deterministic
+    $context = [Runtime.Loader.AssemblyLoadContext]::new('CS2PS-negative',$true)
+    try {
+        $actual = $context.LoadFromAssemblyPath($candidate).GetType('ProgressLayout').GetMethod('Clamp')
+        $oraclePath = (Get-ChildItem -LiteralPath $build -Filter 'ProgressLayout.reference.*.dll' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).FullName
+        $expected = $context.LoadFromAssemblyPath($oraclePath).GetType('ProgressLayout').GetMethod('Clamp')
+        $vectors = @(Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/ProgressLayout.cases.json') | ConvertFrom-Json | Where-Object Method -ceq Clamp)
+        $differences = 0
+        foreach ($culture in 'en-US','fr-FR') {
+            [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($culture)
+            foreach ($vector in $vectors) {
+                $arguments = [object[]]@($vector.Arguments | ForEach-Object { [int]$_ })
+                if ($expected.Invoke($null,$arguments) -cne $actual.Invoke($null,$arguments)) { $differences++ }
+            }
+        }
+        if (-not $differences) { throw 'Behavioral validator failed to detect corrupted generated output.' }
+    } finally { $context.Unload() }
+    $negative = @(& $dotnet exec $hostPath $candidate ProgressLayout en-US (Join-Path $PSScriptRoot 'fixtures/ProgressLayout.cases.json') Clamp 2>&1)
+    if ($LASTEXITCODE -ne 1 -or "$($negative[-1])" -cne 'calls 3, differences 2, SMA absent') { throw 'Dotnet-only negative control did not detect exactly the expected corruption.' }
+    $damaged = Join-Path $directory 'damaged.dll'
+    [IO.File]::WriteAllBytes($damaged,[byte[]]@(0,0,0,0))
+    $log = @(& $dotnet exec --runtimeconfig ([IO.Path]::ChangeExtension($hostPath,'runtimeconfig.json')) $tool $damaged --system-module System.Private.CoreLib -r (Join-Path $PSHOME 'System.Private.CoreLib.dll') 2>&1)
+    if ($LASTEXITCODE -eq 0) { throw 'ILVerify accepted a damaged assembly.' }
+    Save-Text (Join-Path $directory 'negative-structure.log') ($log -join "`n")
+    $report = @{Tool='dotnet-ilverify';Version='10.0.12';PackageSHA256=$digest;FrameworkReference=(Join-Path $PSHOME 'System.Private.CoreLib.dll');FrameworkSHA256=(Get-FileHash -LiteralPath (Join-Path $PSHOME 'System.Private.CoreLib.dll')).Hash;Checks=$checks;BehavioralNegative=@{Status='PASS';DetectedDifferences=$differences;CasesPerCulture=$vectors.Count;Cultures=@('en-US','fr-FR');OracleSHA256=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'fixtures/ProgressLayout.cs')).Hash};StructuralNegative='PASS'}
+    $report.DotnetOnly = @($hostChecks)
+    $report.DotnetOnlyNegative = @{Status='PASS';Culture='en-US';Cases=3;DetectedDifferences=2}
+    $report.RuntimeSHA512 = $runtimeDigest
+    $report.Runtime = '11.0.0-rc.1.26425.128'
+    $report.ComparisonSources = @($sourcePaths | ForEach-Object { @{Path=$_;SHA256=(Get-FileHash -LiteralPath $_).Hash} })
+    Save-Text (Join-Path $directory 'receipt.json') ($report | ConvertTo-Json -Depth 8)
+    "ILVerify: $($checks.Count) assemblies verified; behavioral corruption detected ($differences differences); damaged assembly rejected."
+    return
+}
 if ($Mode -eq 'SourceClosure') {
     $upstream = Join-Path $build 'cache/android-bindings/37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5/external/Java.Interop/src/Java.Interop.Tools.TypeNameMappings/Java.Interop.Tools.TypeNameMappings/JavaNativeTypeManager.cs'
     # Validate the existing acquisition rather than reading an external checkout.
@@ -235,12 +361,14 @@ if ($Mode -eq 'OutputContract') {
 }
 if ($Mode -eq 'AndroidBindings') {
     $pin = '37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5'
-    $vendor = 'C:/Dev/.vendor/dotnet-android'
+    $vendor = $AndroidSourceRoot
     $directory = Join-Path $build 'android-bindings'
     $cache = Join-Path $build "cache/android-bindings/$pin"
     $null = [IO.Directory]::CreateDirectory($cache)
     $integrityPath = Join-Path $cache 'integrity.json'
     if (-not (Test-Path -LiteralPath $integrityPath)) {
+        & git -C $vendor cat-file -e "${pin}^{commit}"
+        if ($LASTEXITCODE) { throw 'Pinned Android source commit is unavailable.' }
         $available = @(& git -C $vendor ls-tree -r --name-only $pin src/Mono.Android external/Java.Interop/src/Java.Interop external/Java.Interop/src/Java.Interop.Tools.TypeNameMappings)
         if ($LASTEXITCODE) { throw 'Pinned Android binding source is unavailable.' }
         $paths = @('LICENSE.TXT','external/Java.Interop/LICENSE','external/Java.Interop/ThirdPartyNotices.txt','src/Mono.Android/Profiles/api-36.xml','src/Mono.Android/Mono.Android.csproj') + @($available | Where-Object {

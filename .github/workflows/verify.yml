@@ -1,0 +1,60 @@
+name: CS2PS Conformance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out CS2PS and its historical test baselines
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out unchanged pinned PSLowering
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: MansfieldPlumbing/PSLowering
+          ref: 1afabe056235a570da29e268824784557d4f6cdd
+          path: build/cache/PSLowering
+          persist-credentials: false
+      - name: Check out pinned Android source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: dotnet/android
+          ref: 37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5
+          path: build/cache/android-source
+          persist-credentials: false
+      - name: Run conformance with hash-verified PowerShell 7.7 preview.5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((Get-FileHash ./build/cache/PSLowering/tools/Get-PowerShell.ps1).Hash -cne '23758AD51646932846DA9D03467F102D336E3BA0C7AA2D9BCCA1892D667E3E35') { throw 'Bootstrap digest mismatch.' }
+          $pwsh = & ./build/cache/PSLowering/tools/Get-PowerShell.ps1
+          & $pwsh -NoProfile -File ./tests/Test-IdiomaticOutput.ps1 -Mode CI -AndroidSourceRoot ./build/cache/android-source
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git diff --exit-code -- src tests
+          exit $LASTEXITCODE
+      - name: Retain test evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: conformance-evidence
+          retention-days: 14
+          path: |
+            build/ci-receipt.json
+            build/*.generated.ps1
+            build/binding-traces/**/receipt.json
+            build/call-matrix/current.json
+            build/android-bindings/receipt.json
+            build/output-contract/**
+            build/source-closure/receipt.json
+            build/ilverify/*.log
+            build/ilverify/receipt.json
