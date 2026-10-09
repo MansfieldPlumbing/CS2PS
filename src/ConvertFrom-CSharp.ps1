@@ -56,7 +56,7 @@ function ConvertFrom-CSharp {
     foreach ($node in $tree.GetRoot().DescendantNodes() | Where-Object { $_.GetType().Name -in 'AttributeListSyntax','EnumDeclarationSyntax','DelegateDeclarationSyntax','GlobalStatementSyntax' }) { Add-Diagnostic $node "declaration $($node.GetType().Name)" }
 
     $out = [System.Text.StringBuilder]::new()
-    [void]$out.AppendLine(@'
+    $helpers = @'
 # C# element access throws rather than accepting PowerShell negative indices.
 function Get-CS2PSElement($collection, [int] $index) {
     if ($null -eq $collection) { throw [NullReferenceException]::new() }
@@ -261,7 +261,7 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
     if ($operator -eq '-') { return Invoke-CS2PSNumber 0 $value '-' $type $checked }
     Invoke-CS2PSInteger $value 0 $operator $type $false
 }
-'@)
+'@
     $types = @($tree.GetRoot().DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] })
     $usedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($type in $types) {
@@ -281,6 +281,28 @@ function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [
         foreach ($m in $type.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] }) {
             [void]$out.AppendLine((Convert-Method $type $m)).AppendLine()
         }
+    }
+    # Retain only calls reachable from this unit, including helper dependencies.
+    $body = $out.ToString()
+    $helperAst = [Management.Automation.Language.Parser]::ParseInput($helpers, [ref]$null, [ref]$null)
+    $definitions = @{}
+    foreach ($function in $helperAst.FindAll({ param($ast) $ast -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) { $definitions[$function.Name] = $function }
+    $required = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $pending = [Collections.Generic.Queue[string]]::new()
+    $bodyAst = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$null)
+    foreach ($command in $bodyAst.FindAll({ param($ast) $ast -is [Management.Automation.Language.CommandAst] }, $true)) {
+        $name = $command.GetCommandName()
+        if ($name -and $definitions.ContainsKey($name) -and $required.Add($name)) { $pending.Enqueue($name) }
+    }
+    while ($pending.Count) {
+        foreach ($command in $definitions[$pending.Dequeue()].FindAll({ param($ast) $ast -is [Management.Automation.Language.CommandAst] }, $true)) {
+            $name = $command.GetCommandName()
+            if ($name -and $definitions.ContainsKey($name) -and $required.Add($name)) { $pending.Enqueue($name) }
+        }
+    }
+    if ($required.Count) {
+        [void]$out.AppendLine('# Semantic support used by this file.')
+        foreach ($function in $helperAst.EndBlock.Statements) { if ($required.Contains($function.Name)) { [void]$out.AppendLine($function.Extent.Text) } }
     }
     # Fail closed: a diagnostic never leaves a partially translated program executable.
     if (@($script:Diagnostics | Where-Object Severity -NE 'Information').Count) {
