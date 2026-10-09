@@ -4,6 +4,7 @@ param([string] $Fixture, [string] $Culture = 'en-US')
 $ErrorActionPreference = 'Stop'
 [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($Culture)
 $root = Split-Path $PSScriptRoot
+. (Join-Path $PSScriptRoot 'Test-FixtureOrigins.ps1')
 . (Join-Path $root 'src/ConvertFrom-CSharp.ps1')
 Initialize-Roslyn
 $build = Join-Path $root 'build'
@@ -67,13 +68,21 @@ foreach ($file in $fixtures) {
     $fixtureCalls = 0
     foreach ($case in $cases) {
         $type = $assembly.GetType($case.Type, $true)
-        $method = $type.GetMethod($case.Method, [Reflection.BindingFlags]'Public,NonPublic,Static')
+        $flags = if ($case.Instance) { [Reflection.BindingFlags]'Public,NonPublic,Instance' } else { [Reflection.BindingFlags]'Public,NonPublic,Static' }
+        $method = $type.GetMethod($case.Method, $flags)
         if (-not $method) { throw "Missing test method: $($case.Type).$($case.Method)" }
         $mapping = @($result.Methods | Where-Object { $_.Type -ceq $case.Type -and $_.Method -ceq $case.Method })
         if ($mapping.Count -ne 1) { throw 'Ambiguous generated method mapping' }
         $parameters = $method.GetParameters()
         if ($case.Arguments.Count -ne $parameters.Count) { throw 'Incorrect parity argument count' }
         $argsCS = [object[]]::new($parameters.Count); $splat = @{}
+        $receiverCS = $null
+        if ($case.Instance) {
+            $receiverCS = [Activator]::CreateInstance($type, $true)
+            $typeMapping = @($result.Types | Where-Object { $_.Type -ceq $case.Type })
+            if ($typeMapping.Count -ne 1 -or -not $typeMapping[0].DefaultFactory) { throw 'Instance parity requires a default constructor' }
+            $splat.self = & $typeMapping[0].DefaultFactory
+        }
         for ($i = 0; $i -lt $parameters.Count; $i++) {
             $argsCS[$i] = Convert-InputValue $case.Arguments[$i] $parameters[$i].ParameterType
             $splat[$mapping[0].Parameters[$i]] = Convert-InputValue $case.Arguments[$i] $parameters[$i].ParameterType
@@ -84,7 +93,7 @@ foreach ($file in $fixtures) {
         $originalOut = [Console]::Out
         try {
             [Console]::SetOut($writerCS)
-            try { $expected = $method.Invoke($null, $argsCS) } catch { $csError = Get-RootException $_.Exception }
+            try { $expected = $method.Invoke($receiverCS, $argsCS) } catch { $csError = Get-RootException $_.Exception }
             [Console]::SetOut($writerPS)
             try { $actual = & $mapping[0].Function @splat } catch { $psError = Get-RootException $_.Exception }
         } finally { [Console]::SetOut($originalOut) }

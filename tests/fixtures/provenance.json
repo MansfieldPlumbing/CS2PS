@@ -1,0 +1,189 @@
+[
+  {
+    "Fixture": "BitsLeft.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenOperators.cs",
+    "SourceLine": 2413,
+    "Test": "BuiltInLeftShiftOperators",
+    "SourceGitBlob": "e8cd1448ec4c890e4652543bfd8285ccad40914d",
+    "SourceSHA256": "6420214278DC1C54D45D3A45E59478C1BAB767D98F015A6889273911E1FC922C",
+    "FixtureSHA256": "2D862510E222621EE7025FEBF108811D7A08426C425AE4BB14259AF13B664F35"
+  },
+  {
+    "Fixture": "BitsRight.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenOperators.cs",
+    "SourceLine": 2478,
+    "Test": "BuiltInRightShiftOperators",
+    "SourceGitBlob": "e8cd1448ec4c890e4652543bfd8285ccad40914d",
+    "SourceSHA256": "6420214278DC1C54D45D3A45E59478C1BAB767D98F015A6889273911E1FC922C",
+    "FixtureSHA256": "C31707CEC958304CA5365A3D40DFA8D1870C644F0AFD0AC9EBE767ADC10A9815"
+  },
+  {
+    "Fixture": "Character.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenTests.cs",
+    "SourceLine": 9248,
+    "Test": "ImplicitConversionCharToDecimal",
+    "SourceGitBlob": "522944a65575c032ed758f3a68a6d5237e3c9c69",
+    "SourceSHA256": "919176486C83FA111EED5E79165BB81AD29CDE9EFFEC1D636AB7C712FCBA4FDE",
+    "FixtureSHA256": "2CBC54476BAD9B6280261E5CE9A306FB88F1CAF5D86EFF0788770D573A5CE9BE"
+  },
+  {
+    "Fixture": "Checked.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenTests.cs",
+    "SourceLine": 13256,
+    "Test": "Bug17007",
+    "SourceGitBlob": "522944a65575c032ed758f3a68a6d5237e3c9c69",
+    "SourceSHA256": "919176486C83FA111EED5E79165BB81AD29CDE9EFFEC1D636AB7C712FCBA4FDE",
+    "FixtureSHA256": "5786052A848081AF3F15186AC34D8A925A3F58D6ABBA510652A10E573DD7047E"
+  },
+  {
+    "Fixture": "Exceptions.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenTryFinally.cs",
+    "SourceLine": 234,
+    "Test": "TryCatch",
+    "SourceGitBlob": "74e8d38756876e0db5ec62efc45bc218ed1215f7",
+    "SourceSHA256": "3ED12E5626219FD67ECF94AAFA47A6210FDDEDAA37ED37A87D35BCB102B1C856",
+    "FixtureSHA256": "CBCB30BCBB861393C03A20B8238EECF4857A9E8911287FE07CF1513E84C4759A"
+  },
+  {
+    "Fixture": "InstanceClass.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenTests.cs",
+    "SourceLine": 3086,
+    "Test": "RefInstanceField",
+    "SourceGitBlob": "522944a65575c032ed758f3a68a6d5237e3c9c69",
+    "SourceSHA256": "919176486C83FA111EED5E79165BB81AD29CDE9EFFEC1D636AB7C712FCBA4FDE",
+    "FixtureSHA256": "5BE8248B8D86BCE953C9D6C4BDCF0461C3DB4E5F1B9A11574CD8620AAEDBF3AF"
+  },
+  {
+    "Fixture": "InstanceMethods.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenTests.cs",
+    "SourceLine": 7046,
+    "Test": "Temporaries",
+    "SourceGitBlob": "522944a65575c032ed758f3a68a6d5237e3c9c69",
+    "SourceSHA256": "919176486C83FA111EED5E79165BB81AD29CDE9EFFEC1D636AB7C712FCBA4FDE",
+    "FixtureSHA256": "1C66CC3957947D1060E95EEB106797F3CDA39D693DD8F66709E83BB6152D24E3"
+  },
+  {
+    "Fixture": "Interpolation.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenInterpolatedString.cs",
+    "SourceLine": 20,
+    "Test": "AlternateVerbatimString",
+    "SourceGitBlob": "ead1076ed1c13f7b5cb6a5da54199f1ff0cfd0c9",
+    "SourceSHA256": "08074A6CF51996BBDDA898F67907873E7A8E466BE7BE81390BBE1EE31DF62784",
+    "FixtureSHA256": "30B0361DC848E7D5C62810760DB002354ABB2F098B17D42235E37C5DD9D6E8E4"
+  },
+  {
+    "Fixture": "LoopsArray.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/ForeachTest.cs",
+    "SourceLine": 26,
+    "Test": "SimpleLoop",
+    "SourceGitBlob": "a7110c72bbd052861a54a125cb758aeef450d07d",
+    "SourceSHA256": "EED7A5336863EB0F5F5836677EF4C0563D3BCB5C451B7F70BACFC3C2CFA570F7",
+    "FixtureSHA256": "58E4C4A1D1A4C22395B58FC0E8FD2715234044D6E95602FC90FDA10A56401CEF"
+  },
+  {
+    "Fixture": "LoopsFor.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/ForLoopsTests.cs",
+    "SourceLine": 23,
+    "Test": "ForLoop",
+    "SourceGitBlob": "f3867fa81beb69f7f13975e343ac489153d74405",
+    "SourceSHA256": "13F2F0234532638CB84420FFAD157085DE7CED1C3E8BBD52C0A882B227A6DC21",
+    "FixtureSHA256": "721044A55EB092023BF02445097C0F14F897239C3E89792E5AC9F0CFFD9493AA"
+  },
+  {
+    "Fixture": "LoopsList.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/ForeachTest.cs",
+    "SourceLine": 170,
+    "Test": "TestRemoveValueInForeach",
+    "SourceGitBlob": "a7110c72bbd052861a54a125cb758aeef450d07d",
+    "SourceSHA256": "EED7A5336863EB0F5F5836677EF4C0563D3BCB5C451B7F70BACFC3C2CFA570F7",
+    "FixtureSHA256": "6F3806EDCBEF7D491FE418462C98A61919BCAA4FBA9FAA8F72F7A0273B99FDEB"
+  },
+  {
+    "Fixture": "LoopsWhile.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenTests.cs",
+    "SourceLine": 5461,
+    "Test": "BranchesAndReturn",
+    "SourceGitBlob": "522944a65575c032ed758f3a68a6d5237e3c9c69",
+    "SourceSHA256": "919176486C83FA111EED5E79165BB81AD29CDE9EFFEC1D636AB7C712FCBA4FDE",
+    "FixtureSHA256": "F43ED9CB98ADC979420AAB4FB25B54B1670DAC5ADBEAEE579B677A3DCCED66A0"
+  },
+  {
+    "Fixture": "NullableBool.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenOptimizedNullableOperators.cs",
+    "SourceLine": 2013,
+    "Test": "TestNullableBoolBinOpsOneNull",
+    "SourceGitBlob": "5de2c84e3264c9ce0374513a876bc2fd102d5f78",
+    "SourceSHA256": "54DDF2777AFD019D2DF670B61A50B5B895CC90E604417850EC7F276C9C60CB4C",
+    "FixtureSHA256": "033B597F75984C6F21232446AAB4E90FCDE04D41F04730CAFD417BE9E0637E3C"
+  },
+  {
+    "Fixture": "RefOut.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenRefOutTests.cs",
+    "SourceLine": 54,
+    "Test": "TestOneReferenceMultipleParameters",
+    "SourceGitBlob": "49d17ac268937d8bc69c705432e1d8c67d9611a2",
+    "SourceSHA256": "DC410F91CBE55543209F7BCB4853DEFD256E54D10E13FDBF29DD0969B14E2417",
+    "FixtureSHA256": "EAE115A4BA0C0D1341AED34B25774A6C7052A8E722EF39755F7DE810883DBE3F"
+  },
+  {
+    "Fixture": "StructValue.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/CodeGenStructsAndEnum.cs",
+    "SourceLine": 597,
+    "Test": "UseStructLocal",
+    "SourceGitBlob": "41f0fcafaf00d7003a2c91d15e839ca61549f8b9",
+    "SourceSHA256": "42463425197C4677A62ACF33DB3F2374B9B429D456ED01D46B162AD1CC919BDB",
+    "FixtureSHA256": "627D3DA33908FEF42A6C51AA008FA85363825738F4B87FF85DF8063E80CCA602"
+  },
+  {
+    "Fixture": "SwitchExpression.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit3/Semantics/PatternMatchingTests3.cs",
+    "SourceLine": 1249,
+    "Test": "TargetTypedSwitch_NaturalTypeWithUntypedArm_01",
+    "SourceGitBlob": "748f22e7cad67d0fa3951e6ec81d6f1cf8d966e7",
+    "SourceSHA256": "F6237CA104690B51A3348085D8E7BF3F5067CF4604BFD23DB8B15DC8A11954E3",
+    "FixtureSHA256": "B75BC4B52E8B47E54C2B2E75A97E5AEA99D92EF38CBAF8CA1187BE4AF467C49F"
+  },
+  {
+    "Fixture": "SwitchStatement.cs",
+    "Repository": "https://github.com/dotnet/roslyn",
+    "Commit": "ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da",
+    "SourcePath": "src/Compilers/CSharp/Test/Emit/CodeGen/SwitchTests.cs",
+    "SourceLine": 172,
+    "Test": "NonConstantSwitchArgumentExpression",
+    "SourceGitBlob": "6c4e93a936a2b57131e3185611810a59c4c10dcc",
+    "SourceSHA256": "8A2559010768D72741326AB4614A72FC6D01C52C1DBEF1652639B4FAE3D66229",
+    "FixtureSHA256": "3348A2E98BE8F1D4360880365043940A92D5DB35C35A69131E465BF0F59DAC06"
+  }
+]

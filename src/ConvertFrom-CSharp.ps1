@@ -11,11 +11,10 @@
     names map to approved verbs. Constructs outside the supported subset are
     reported as diagnostics and marked in the output, never guessed.
 
-    Supported in this first slice: static methods; parameters and locals of
-    simple types; if/else, for, foreach, while, return, blocks; assignment and
-    compound assignment; ++/--; arithmetic, comparison, logical and
-    conditional expressions; casts; calls to static .NET members and to
-    instance members of values.
+    The fixture-backed subset includes array/List loops, switches, simple
+    classes and structs, ref/out parameters, formatting, fixed-width integer
+    arithmetic, bit operations, UTF-16 arithmetic, exceptions and nullable
+    primitive values. Unsupported input is marked and fails closed.
 .OUTPUTS
     An object with the generated PowerShell text and its diagnostics.
 #>
@@ -46,16 +45,21 @@ function ConvertFrom-CSharp {
     $script:UnitId = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Source))).Substring(0,12)
 
     $errors = @($compilation.GetDiagnostics() | Where-Object { $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error })
-    if ($errors.Count) { throw "C# source does not compile: $($errors[0])" }
+    if ($errors.Count) {
+        foreach ($error in $errors) { Add-Diagnostic $error "C# compiler diagnostic $($error.Id)" }
+        $marked = ($script:Diagnostics | ForEach-Object { "# CS2PS: unsupported at line $($_.Line): $($_.Message)" }) -join "`n"
+        return [pscustomobject]@{ PowerShell = $marked + "`nthrow [NotSupportedException]::new('C# input has compiler diagnostics.')`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = @() }
+    }
+    foreach ($node in $tree.GetRoot().DescendantNodes() | Where-Object { $_.GetType().Name -in 'AttributeListSyntax','EnumDeclarationSyntax','DelegateDeclarationSyntax','GlobalStatementSyntax' }) { Add-Diagnostic $node "declaration $($node.GetType().Name)" }
 
     $out = [System.Text.StringBuilder]::new()
     [void]$out.AppendLine(@'
 # C# element access throws rather than accepting PowerShell negative indices.
 function Get-CS2PSElement($collection, [int] $index) {
     if ($null -eq $collection) { throw [NullReferenceException]::new() }
-    $count = if ($collection -is [array]) { $collection.Length } else { $collection.Count }
+    $count = if ($collection -is [array] -or $collection -is [string]) { $collection.Length } else { $collection.Count }
     if ($index -lt 0 -or $index -ge $count) {
-        if ($collection -is [array]) { throw [IndexOutOfRangeException]::new() }
+        if ($collection -is [array] -or $collection -is [string]) { throw [IndexOutOfRangeException]::new() }
         throw [ArgumentOutOfRangeException]::new('index')
     }
     return ,$collection[$index]
@@ -69,6 +73,12 @@ function Get-CS2PSReceiver($value) {
     if ($null -eq $value) { throw [NullReferenceException]::new() }
     return ,$value
 }
+function Test-CS2PSConstant($left, $right) {
+    if ($null -eq $left -or $null -eq $right) { return $null -eq $left -and $null -eq $right }
+    if ($left -is [string] -or $right -is [string]) { return [string]::Equals($left, $right, [StringComparison]::Ordinal) }
+    if ($left -is [char] -or $right -is [char]) { return Compare-CS2PSInteger $left $right '==' }
+    return $left -ceq $right
+}
 function Get-CS2PSException($exception) {
     while ($exception -is [System.Management.Automation.RuntimeException] -and $exception.InnerException) { $exception = $exception.InnerException }
     return ,$exception
@@ -76,6 +86,19 @@ function Get-CS2PSException($exception) {
 function Get-CS2PSThrowException($value) {
     if ($null -eq $value) { return [NullReferenceException]::new() }
     return ,$value
+}
+function Invoke-CS2PSRuntime([type] $type, $receiver, [string] $name, [type[]] $parameterTypes, [object[]] $arguments, [bool] $static) {
+    if (-not $static -and $null -eq $receiver) { throw [NullReferenceException]::new() }
+    $flags = if ($static) { [Reflection.BindingFlags]'Public,Static' } else { [Reflection.BindingFlags]'Public,Instance' }
+    $method = $type.GetMethod($name, $flags, $null, $parameterTypes, $null)
+    if (-not $method) { throw [MissingMethodException]::new($type.FullName, $name) }
+    $cells = @{}
+    for ($i = 0; $i -lt $arguments.Length; $i++) {
+        if ($parameterTypes[$i].IsByRef) { $cells[$i] = $arguments[$i]; $arguments[$i] = $arguments[$i].Value }
+    }
+    try { return ,$method.Invoke($receiver, $arguments) }
+    catch [Reflection.TargetInvocationException] { throw $_.Exception.InnerException }
+    finally { foreach ($i in $cells.Keys) { $cells[$i].Value = $arguments[$i] } }
 }
 function Convert-CS2PSInteger($value, [string] $type, [bool] $checked) {
     $bits = switch ($type) { 'sbyte' {8} 'byte' {8} 'short' {16} 'ushort' {16} 'char' {16} 'int' {32} 'uint' {32} 'long' {64} 'ulong' {64} }
@@ -165,6 +188,76 @@ function Convert-CS2PSFloatingInteger($value, [string] $type, [bool] $checked) {
     }
     Convert-CS2PSInteger $result $type $false
 }
+function Get-CS2PSNullableValue($value) {
+    if ($null -eq $value) { throw [InvalidOperationException]::new('Nullable object must have a value.') }
+    return ,$value
+}
+function Get-CS2PSNullableDefault($value, $default) {
+    if ($null -eq $value) { return ,$default }
+    return ,$value
+}
+function Convert-CS2PSNullable($value, [string] $type, [bool] $checked) {
+    if ($null -eq $value) { return $null }
+    if ($type -in 'sbyte','byte','short','ushort','char','int','uint','long','ulong') {
+        if ($value -is [double] -or $value -is [float] -or $value -is [decimal]) { return Convert-CS2PSFloatingInteger $value $type $checked }
+        return Convert-CS2PSInteger $value $type $checked
+    }
+    return [System.Management.Automation.LanguagePrimitives]::ConvertTo($value, [type]$type)
+}
+function Invoke-CS2PSNumber($left, $right, [string] $operator, [string] $type, [bool] $checked) {
+    if ($type -in 'sbyte','byte','short','ushort','char','int','uint','long','ulong') {
+        if ($operator -in '==','!=','<','>','<=','>=') { return Compare-CS2PSInteger $left $right $operator }
+        return Invoke-CS2PSInteger $left $right $operator $type $checked
+    }
+    if ($type -eq 'bool') {
+        if ($operator -eq '==') { return $left -eq $right }
+        if ($operator -eq '!=') { return $left -ne $right }
+        return Invoke-CS2PSBoolean $left $right $operator
+    }
+    $l = [System.Management.Automation.LanguagePrimitives]::ConvertTo($left, [type]$type)
+    $r = [System.Management.Automation.LanguagePrimitives]::ConvertTo($right, [type]$type)
+    if ($type -ne 'decimal' -and ([double]::IsNaN($l) -or [double]::IsNaN($r))) {
+        if ($operator -in '==','!=','<','>','<=','>=') { return $operator -eq '!=' }
+    }
+    $value = switch ($operator) {
+        '+' { $l + $r } '-' { $l - $r } '*' { $l * $r }
+        '/' {
+            if ($r -eq 0) {
+                if ($type -eq 'decimal') { throw [DivideByZeroException]::new() }
+                if ($l -eq 0 -or [double]::IsNaN($l)) { [double]::NaN }
+                else {
+                    $negative = ([BitConverter]::DoubleToInt64Bits([double]$l) -lt 0) -xor ([BitConverter]::DoubleToInt64Bits([double]$r) -lt 0)
+                    if ($negative) { [double]::NegativeInfinity } else { [double]::PositiveInfinity }
+                }
+            } else { $l / $r }
+        }
+        '%' { if ($r -eq 0 -and $type -ne 'decimal') { [double]::NaN } elseif ($r -eq 0) { throw [DivideByZeroException]::new() } else { $l % $r } }
+        '==' { return $l -eq $r } '!=' { return $l -ne $r }
+        '<' { return $l -lt $r } '>' { return $l -gt $r }
+        '<=' { return $l -le $r } '>=' { return $l -ge $r }
+    }
+    [System.Management.Automation.LanguagePrimitives]::ConvertTo($value, [type]$type)
+}
+function Invoke-CS2PSNullableBinary($left, $right, [string] $operator, [string] $type, [bool] $checked) {
+    if ($operator -in '==','!=') {
+        $equal = if ($null -eq $left -or $null -eq $right) { $null -eq $left -and $null -eq $right } else { Invoke-CS2PSNumber $left $right '==' $type $checked }
+        if ($operator -eq '==') { return $equal }; return -not $equal
+    }
+    if ($type -eq 'bool' -and $operator -eq '&' -and (($null -ne $left -and -not $left) -or ($null -ne $right -and -not $right))) { return $false }
+    if ($type -eq 'bool' -and $operator -eq '|' -and (($null -ne $left -and $left) -or ($null -ne $right -and $right))) { return $true }
+    if ($null -eq $left -or $null -eq $right) {
+        if ($operator -in '<','>','<=','>=') { return $false }
+        return $null
+    }
+    Invoke-CS2PSNumber $left $right $operator $type $checked
+}
+function Invoke-CS2PSNullableUnary($value, [string] $operator, [string] $type, [bool] $checked) {
+    if ($null -eq $value) { return $null }
+    if ($operator -eq '!') { return -not $value }
+    if ($operator -eq '+') { return ,$value }
+    if ($operator -eq '-') { return Invoke-CS2PSNumber 0 $value '-' $type $checked }
+    Invoke-CS2PSInteger $value 0 $operator $type $false
+}
 '@)
     $types = @($tree.GetRoot().DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] })
     $usedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -174,7 +267,7 @@ function Convert-CS2PSFloatingInteger($value, [string] $type, [bool] $checked) {
         if ($symbol.TypeKind.ToString() -eq 'Struct') { [void]$script:StructTypes.Add($symbol.ToString()) }
         foreach ($m in $type.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] }) {
             $method = $script:Model.GetDeclaredSymbol($m)
-            $name = Get-FunctionName $type.Identifier.Text $m.Identifier.Text ($method.ReturnType.SpecialType.ToString() -ne 'System_Void')
+            $name = Get-FunctionName $symbol.Name $method.Name ($method.ReturnType.SpecialType.ToString() -ne 'System_Void')
             if (-not $usedNames.Add($name)) { $name += '_m' + $m.Span.Start; [void]$usedNames.Add($name) }
             $script:MethodNames[$m.Span.Start] = $name
         }
@@ -191,7 +284,12 @@ function Convert-CS2PSFloatingInteger($value, [string] $type, [bool] $checked) {
         foreach ($d in $script:Diagnostics) { [void]$out.AppendLine("# CS2PS: unsupported at line $($d.Line): $($d.Message)") }
         [void]$out.AppendLine("throw [NotSupportedException]::new('CS2PS translation has diagnostics.')")
     }
-    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray() }
+    $typeMappings = foreach ($type in $types) {
+        $symbol = $script:Model.GetDeclaredSymbol($type)
+        $default = @($symbol.InstanceConstructors | Where-Object { $_.Parameters.Length -eq 0 })
+        [pscustomobject]@{ Type = $symbol.ToString(); DefaultFactory = $(if ($default.Count) { Get-ConstructorFunction $default[0] } else { $null }) }
+    }
+    [pscustomobject]@{ PowerShell = $out.ToString().TrimEnd() + "`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = $script:Methods.ToArray(); Types = @($typeMappings) }
 }
 
 function Initialize-Roslyn {
@@ -202,8 +300,23 @@ function Initialize-Roslyn {
 }
 
 function Add-Diagnostic($node, [string] $message) {
-    $line = $node.GetLocation().GetLineSpan().StartLinePosition.Line + 1
+    $location = if ($node -is [Microsoft.CodeAnalysis.Diagnostic]) { $node.Location } else { $node.GetLocation() }
+    $line = $location.GetLineSpan().StartLinePosition.Line + 1
     $script:Diagnostics.Add([pscustomobject]@{ Line = $line; Message = $message })
+}
+function Test-SupportedValueType($type) {
+    if (Test-Nullable $type) {
+        $element = Get-UnderlyingType $type
+        return (Test-Integral $element) -or (Test-Floating $element) -or $element.SpecialType.ToString() -eq 'System_Boolean'
+    }
+    if ($type -is [Microsoft.CodeAnalysis.IArrayTypeSymbol]) { return $type.Rank -eq 1 -and -not (Test-SourceStruct $type.ElementType) -and (Test-SupportedValueType $type.ElementType) }
+    if (Test-SourceType $type) { return $true }
+    if ($type.SpecialType.ToString() -in 'System_Object','System_Void','System_String','System_Boolean') { return $true }
+    if ((Test-Integral $type) -or (Test-Floating $type)) { return $true }
+    if ($type -is [Microsoft.CodeAnalysis.INamedTypeSymbol] -and $type.OriginalDefinition.ToString() -ceq 'System.Collections.Generic.List<T>') { return Test-SupportedValueType $type.TypeArguments[0] }
+    $base = $type
+    while ($base) { if ($base.ToString() -ceq 'System.Exception') { return $true }; $base = $base.BaseType }
+    return $false
 }
 
 function Get-PsTypeName($typeSymbol) {
@@ -216,17 +329,18 @@ function Get-PsTypeName($typeSymbol) {
         'System_Int32' { return 'int' } 'System_Int64' { return 'long' } 'System_Double' { return 'double' }
         'System_Single' { return 'float' } 'System_Boolean' { return 'bool' } 'System_String' { return 'string' }
         'System_Char' { return 'char' } 'System_Byte' { return 'byte' } 'System_Int16' { return 'short' }
+        'System_Object' { return 'object' }
         'System_SByte' { return 'sbyte' } 'System_UInt16' { return 'ushort' }
         'System_UInt32' { return 'uint' } 'System_UInt64' { return 'ulong' } 'System_Decimal' { return 'decimal' }
         'System_Void' { return $null }
     }
-    $typeSymbol.ToString()
+    $typeSymbol.ToString().TrimEnd('?')
 }
 
 # Syntax positions identify declared symbols, including shadowed and case-only names.
 function Get-VariableName($symbol) { 'v' + $symbol.DeclaringSyntaxReferences[0].Span.Start }
 function Get-StorageType($symbol) {
-    if (Test-String $symbol) { return 'object' } # [string] silently converts null to empty.
+    if ((Test-String $symbol) -or (Test-Nullable $symbol)) { return 'object' } # Preserve null and boxed underlying values.
     Get-PsTypeName $symbol
 }
 function Get-DefaultValue($type) {
@@ -234,6 +348,8 @@ function Get-DefaultValue($type) {
     if ($type.IsReferenceType -or ($type -is [Microsoft.CodeAnalysis.INamedTypeSymbol] -and $type.OriginalDefinition.SpecialType.ToString() -eq 'System_Nullable_T')) { return '$null' }
     return "[$(Get-PsTypeName $type)]0"
 }
+function Test-Nullable($type) { $type -is [Microsoft.CodeAnalysis.INamedTypeSymbol] -and $type.OriginalDefinition.SpecialType.ToString() -eq 'System_Nullable_T' }
+function Get-UnderlyingType($type) { if (Test-Nullable $type) { return $type.TypeArguments[0] }; return $type }
 
 function Test-SourceType($symbol) { $symbol -and $script:SourceTypes.ContainsKey($symbol.ToString()) }
 function Test-SourceStruct($symbol) { $symbol -and $script:StructTypes.Contains($symbol.ToString()) }
@@ -242,6 +358,11 @@ function Convert-Value($expr) {
     if (Test-SourceStruct (Get-ExprType $expr)) { return "(Copy-$(Get-PsTypeName (Get-ExprType $expr)) ($text))" }
     $source = Get-ExprType $expr
     $target = $script:Model.GetTypeInfo($expr).ConvertedType
+    if (Test-Nullable $target) {
+        $underlying = Get-UnderlyingType $target
+        if (Test-SourceStruct $underlying) { return $text }
+        return "(Convert-CS2PSNullable ($text) '$(Get-PsTypeName $underlying)' $(Get-CheckedFlag $expr))"
+    }
     if ($source -and $target -and $source.SpecialType -ne $target.SpecialType -and ((Test-Integral $target) -or (Test-Floating $target))) {
         if ($source.SpecialType.ToString() -eq 'System_Char') { $text = "[int]($text)" }
         return "[$(Get-PsTypeName $target)]($text)"
@@ -267,6 +388,7 @@ function Convert-TypeDeclaration($node) {
         if (@($field.Modifiers | Where-Object { $_.Text -in 'readonly','volatile','const' }).Count) { Add-Diagnostic $field 'readonly, volatile and const fields'; continue }
         foreach ($v in $field.Declaration.Variables) {
             $f = $script:Model.GetDeclaredSymbol($v)
+            if (-not (Test-SupportedValueType $f.Type)) { Add-Diagnostic $v 'unsupported field type' }
             $static = if ($f.IsStatic) { 'static ' } else { '' }
             $default = if (Test-SourceStruct $f.Type) { " = [$(Get-PsTypeName $f.Type)]::new()" } else { '' }
             $text += "    $static[$(Get-StorageType $f.Type)] `$$(Get-FieldName $f)$default`n"
@@ -289,8 +411,10 @@ function Convert-TypeDeclaration($node) {
     }
     foreach ($member in $node.Members) {
         if ($member.GetType().Name -notin 'MethodDeclarationSyntax','FieldDeclarationSyntax','ConstructorDeclarationSyntax','ClassDeclarationSyntax','StructDeclarationSyntax') { Add-Diagnostic $member "type member $($member.GetType().Name)" }
+        if ($member -is [Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax] -and @($member.Modifiers | Where-Object { $_.Text -eq 'static' }).Count) { Add-Diagnostic $member 'static constructor' }
     }
     foreach ($ctor in $symbol.InstanceConstructors) {
+        foreach ($p in $ctor.Parameters) { if ($p.RefKind.ToString() -ne 'None' -or $p.IsParams -or $p.HasExplicitDefaultValue -or -not (Test-SupportedValueType $p.Type)) { Add-Diagnostic $node 'unsupported constructor parameter' } }
         $name = Get-ConstructorFunction $ctor
         $parameters = @($ctor.Parameters | ForEach-Object { "[$(Get-StorageType $_.Type)] `$$(Get-VariableName $_)" })
         $text += "function $name {`n    param($($parameters -join ', '))`n    `$self = [$typeName]::new()`n"
@@ -336,15 +460,17 @@ function Get-FunctionName([string] $class, [string] $method, [bool] $returnsValu
 function Convert-Method($type, $m) {
     $symbol = $script:Model.GetDeclaredSymbol($m)
     $returnType = Get-PsTypeName $symbol.ReturnType
+    if (-not (Test-SupportedValueType $symbol.ReturnType)) { Add-Diagnostic $m 'unsupported return type' }
     $name = Get-MethodFunction $symbol
-    if ($symbol.IsGenericMethod -or $symbol.IsVirtual -or $symbol.IsOverride -or $symbol.IsAbstract -or $symbol.ReturnsByRef -or $symbol.ReturnsByRefReadonly -or @($m.Modifiers | Where-Object { $_.Text -in 'async','extern' }).Count) { Add-Diagnostic $m 'generic, virtual, ref-return, async or extern method' }
+    if ($symbol.IsGenericMethod -or $symbol.IsExtensionMethod -or $symbol.IsVirtual -or $symbol.IsOverride -or $symbol.IsAbstract -or $symbol.ReturnsByRef -or $symbol.ReturnsByRefReadonly -or @($m.Modifiers | Where-Object { $_.Text -in 'async','extern' }).Count) { Add-Diagnostic $m 'generic, extension, virtual, ref-return, async or extern method' }
     $before = $script:Diagnostics.Count
-    $script:Methods.Add([pscustomobject]@{ Type = $symbol.ContainingType.ToString(); Method = $symbol.Name; Function = $name; Parameters = @($symbol.Parameters | ForEach-Object { Get-VariableName $_ }) })
+    $script:Methods.Add([pscustomobject]@{ Type = $symbol.ContainingType.ToString(); Method = $symbol.Name; Function = $name; IsStatic = $symbol.IsStatic; Parameters = @($symbol.Parameters | ForEach-Object { Get-VariableName $_ }) })
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine("function $name {")
     [void]$sb.AppendLine('    [CmdletBinding()]')
     if ($returnType) { [void]$sb.AppendLine("    [OutputType([$returnType])]") }
     $params = foreach ($p in $symbol.Parameters) {
+        if (-not (Test-SupportedValueType $p.Type) -or $p.IsParams -or $p.HasExplicitDefaultValue) { Add-Diagnostic $m 'unsupported parameter type, params or optional parameter' }
         $t = if ($p.RefKind.ToString() -in 'Ref','Out') { 'ref' } else { Get-StorageType $p.Type }
         if ($p.RefKind.ToString() -notin 'None','Ref','Out') { Add-Diagnostic $m 'in/ref-readonly parameters' }
         "        [AllowNull()] [AllowEmptyString()] [AllowEmptyCollection()] [$t] `$$(Get-VariableName $p)"
@@ -369,8 +495,10 @@ function Convert-Statement($s, [int] $depth) {
     $pad = '    ' * $depth
     switch ($s.GetType().Name) {
         'LocalDeclarationStatementSyntax' {
+            if ($s.UsingKeyword.Text -or $s.AwaitKeyword.Text) { Add-Diagnostic $s 'using/await-using declaration' }
             $lines = foreach ($v in $s.Declaration.Variables) {
                 $t = Get-StorageType ($script:Model.GetDeclaredSymbol($v).Type)
+                if (-not (Test-SupportedValueType ($script:Model.GetDeclaredSymbol($v).Type))) { Add-Diagnostic $v 'unsupported local type' }
                 $init = if ($v.Initializer) { ' = ' + (Convert-Value $v.Initializer.Value) } else { ' = ' + (Get-DefaultValue ($script:Model.GetDeclaredSymbol($v).Type)) }
                 "$pad[$t] `$$(Get-VariableName ($script:Model.GetDeclaredSymbol($v)))$init`n"
             }
@@ -435,12 +563,15 @@ function Convert-Statement($s, [int] $depth) {
             $id = $s.Span.Start
             $v = Get-VariableName ($script:Model.GetDeclaredSymbol($s))
             # Use a real enumerator: List<T> must detect mutation; evaluate collection once.
-            return "${pad}`$enumerator$id = ($(Convert-Expression $s.Expression)).GetEnumerator()`n${pad}try {`n${pad}    :loop$id while (`$enumerator$id.MoveNext()) {`n${pad}        [$((Get-PsTypeName ($script:Model.GetDeclaredSymbol($s).Type)))] `$$v = `$enumerator$id.Current`n$(Convert-Embedded $s.Statement ($depth + 2))${pad}    }`n${pad}} finally {`n${pad}    if (`$enumerator$id -is [IDisposable]) { `$enumerator$id.Dispose() }`n${pad}}`n"
+            $valueType = $script:Model.GetDeclaredSymbol($s).Type
+            $current = if (Test-SourceStruct $valueType) { "(Copy-$(Get-PsTypeName $valueType) (`$enumerator$id.Current))" } else { "`$enumerator$id.Current" }
+            return "${pad}`$enumerator$id = (Get-CS2PSReceiver ($(Convert-Expression $s.Expression))).GetEnumerator()`n${pad}try {`n${pad}    :loop$id while (`$enumerator$id.MoveNext()) {`n${pad}        [$(Get-StorageType $valueType)] `$$v = $current`n$(Convert-Embedded $s.Statement ($depth + 2))${pad}    }`n${pad}} finally {`n${pad}    if (`$enumerator$id -is [IDisposable]) { `$enumerator$id.Dispose() }`n${pad}}`n"
         }
         'WhileStatementSyntax' { return "${pad}:loop$($s.Span.Start) while ($(Convert-Expression $s.Condition)) {`n$(Convert-Embedded $s.Statement ($depth + 1))$pad}`n" }
         'BreakStatementSyntax' { return "${pad}break $(Get-JumpLabel $s $false)`n" }
         'ContinueStatementSyntax' { return "${pad}continue $(Get-JumpLabel $s $true)`n" }
         'SwitchStatementSyntax' {
+            if ((Get-ExprType $s.Expression).SpecialType.ToString() -eq 'System_Object') { Add-Diagnostic $s 'object switch subject' }
             $id = $s.Span.Start; $subject = "`$switchValue$id"
             $text = "${pad}$subject = $(Convert-Expression $s.Expression)`n${pad}:switch$id do {`n"
             $sections = @($s.Sections | Where-Object { -not @($_.Labels | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.DefaultSwitchLabelSyntax] }).Count })
@@ -448,7 +579,7 @@ function Convert-Statement($s, [int] $depth) {
             $first = $true
             foreach ($section in $sections) {
                 $tests = foreach ($label in $section.Labels) {
-                    if ($label -is [Microsoft.CodeAnalysis.CSharp.Syntax.CaseSwitchLabelSyntax]) { "($subject -ceq ($(Convert-Expression $label.Value)))" }
+                    if ($label -is [Microsoft.CodeAnalysis.CSharp.Syntax.CaseSwitchLabelSyntax]) { "(Test-CS2PSConstant ($subject) ($(Convert-Expression $label.Value)))" }
                     else { Add-Diagnostic $label 'pattern switch label'; '$false' }
                 }
                 $keyword = if ($first) { 'if' } else { 'elseif' }; $first = $false
@@ -484,7 +615,7 @@ function Get-JumpLabel($s, [bool] $continue) {
 
 function Convert-Pattern($pattern, [string] $subject) {
     switch ($pattern.GetType().Name) {
-        'ConstantPatternSyntax' { return "($subject -ceq ($(Convert-Expression $pattern.Expression)))" }
+        'ConstantPatternSyntax' { return "(Test-CS2PSConstant ($subject) ($(Convert-Expression $pattern.Expression)))" }
         'DiscardPatternSyntax' { return '$true' }
         default { Add-Diagnostic $pattern "pattern $($pattern.GetType().Name)"; return '$false' }
     }
@@ -504,6 +635,21 @@ function Convert-Argument($argument) {
     $name = '$' + (Get-VariableName $sym)
     if ($sym.Kind.ToString() -eq 'Parameter' -and $sym.RefKind.ToString() -in 'Ref','Out') { return $name }
     return "[ref]$name"
+}
+function Test-SimpleLValue($expression) {
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) { return $true }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.ThisExpressionSyntax]) { return $true }
+    if ($expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax]) {
+        $symbol = $script:Model.GetSymbolInfo($expression).Symbol
+        if ($symbol.IsStatic) { return $true }
+        return Test-SimpleLValue $expression.Expression
+    }
+    return $false
+}
+function New-ArgumentArray([string[]] $values) {
+    if ($values.Count -eq 0) { return '[object[]]@()' }
+    if ($values.Count -eq 1) { return '[object[]]@(,(' + $values[0] + '))' }
+    return '[object[]]@(' + (($values | ForEach-Object { '(' + $_ + ')' }) -join ', ') + ')'
 }
 
 function Convert-Expression($e) {
@@ -552,11 +698,12 @@ function Convert-Expression($e) {
             $op = $e.OperatorToken.Text
             $x = Convert-Expression $e.Operand
             if ($op -in '++','--') { return Convert-Increment $e $false }
+            if (Test-Nullable (Get-ExprType $e.Operand)) { return "(Invoke-CS2PSNullableUnary ($x) '$op' '$(Get-PsTypeName (Get-UnderlyingType (Get-ExprType $e)))' $(Get-CheckedFlag $e))" }
             if ($op -eq '~' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($x) 0 '~' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
             if ($op -eq '-' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger 0 ($x) '-' '$(Get-PsTypeName (Get-ExprType $e))' $(Get-CheckedFlag $e))" }
             switch ($op) { '!' { return "-not ($x)" } '-' { return "-($x)" } '+' { return "($x)" } default { Add-Diagnostic $e "prefix $op"; return '$null' } }
         }
-        'PostfixUnaryExpressionSyntax' { return Convert-Increment $e $true }
+        'PostfixUnaryExpressionSyntax' { if ($e.OperatorToken.Text -eq '!') { return Convert-Expression $e.Operand }; return Convert-Increment $e $true }
         'AssignmentExpressionSyntax' {
             if ($e.Left -is [Microsoft.CodeAnalysis.CSharp.Syntax.ThisExpressionSyntax]) { Add-Diagnostic $e 'assignment to this'; return '$null' }
             if ($e.Left -is [Microsoft.CodeAnalysis.CSharp.Syntax.ElementAccessExpressionSyntax]) {
@@ -565,8 +712,16 @@ function Convert-Expression($e) {
             }
             $left = Convert-Expression $e.Left; $right = Convert-Value $e.Right
             $op = $e.OperatorToken.Text
+            if ($op -eq '??=') {
+                if ($e.Left -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) { Add-Diagnostic $e 'coalescing assignment requires a local or parameter'; return '$null' }
+                return "`$(if (`$null -eq $left) { $left = $right }; ,$left)"
+            }
+            if ($op -ne '=' -and (Test-Nullable (Get-ExprType $e.Left))) {
+                if ($e.Left -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax]) { Add-Diagnostic $e 'nullable compound assignment requires a local or parameter'; return '$null' }
+                return "$left = (Invoke-CS2PSNullableBinary ($left) ($right) '$($op.TrimEnd('='))' '$(Get-PsTypeName (Get-UnderlyingType (Get-ExprType $e.Left)))' $(Get-CheckedFlag $e))"
+            }
             if ($op -ne '=' -and (Test-Integral (Get-ExprType $e.Left))) {
-                if (@($e.Left.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax] }).Count) { Add-Diagnostic $e 'compound assignment with effectful receiver'; return '$null' }
+                if (-not (Test-SimpleLValue $e.Left)) { Add-Diagnostic $e 'compound assignment with effectful receiver'; return '$null' }
                 return "$left = (Invoke-CS2PSInteger ($left) ($right) '$($op.TrimEnd('='))' '$(Get-PsTypeName (Get-ExprType $e.Left))' $(Get-CheckedFlag $e))"
             }
             if ($op -eq '+=' -and (Test-String (Get-ExprType $e.Left))) { return "$left = [string]::Concat($left, $right)" }
@@ -577,6 +732,15 @@ function Convert-Expression($e) {
             $target = $script:Model.GetTypeInfo($e.Type).Type
             $source = Get-ExprType $e.Expression
             $x = Convert-Expression $e.Expression
+            if (Test-Nullable $target) {
+                $underlying = Get-UnderlyingType $target
+                if (Test-SourceStruct $underlying) { Add-Diagnostic $e 'casts to nullable source structs'; return '$null' }
+                return "(Convert-CS2PSNullable ($x) '$(Get-PsTypeName $underlying)' $(Get-CheckedFlag $e))"
+            }
+            if (Test-Nullable $source) {
+                if (-not $target.IsReferenceType) { $x = "(Get-CS2PSNullableValue ($x))" }
+                $source = Get-UnderlyingType $source
+            }
             if ($source.SpecialType.ToString() -eq 'System_Char' -and (Test-Floating $target)) { return "[$(Get-PsTypeName $target)][int]($x)" }
             if ((Test-Integral $target) -and (Test-Integral $source)) { return "(Convert-CS2PSInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
             if ((Test-Integral $target) -and (Test-Floating $source)) { return "(Convert-CS2PSFloatingInteger ($x) '$(Get-PsTypeName $target)' $(Get-CheckedFlag $e))" }
@@ -588,10 +752,11 @@ function Convert-Expression($e) {
         'DefaultExpressionSyntax' {
             $t = Get-ExprType $e
             if (Test-SourceStruct $t) { return "[$(Get-PsTypeName $t)]::new()" }
-            if ($t.IsReferenceType) { return '$null' }
+            if ($t.IsReferenceType -or (Test-Nullable $t)) { return '$null' }
             return "[$(Get-PsTypeName $t)]0"
         }
         'SwitchExpressionSyntax' {
+            if ((Get-ExprType $e.GoverningExpression).SpecialType.ToString() -eq 'System_Object') { Add-Diagnostic $e 'object switch subject' }
             $subject = "`$switchValue$($e.Span.Start)"
             $text = "`$($subject = $(Convert-Expression $e.GoverningExpression); "
             $first = $true
@@ -613,10 +778,16 @@ function Convert-Expression($e) {
         'ImplicitArrayCreationExpressionSyntax' { return "[$(Get-PsTypeName (Get-ExprType $e))]@($(($e.Initializer.Expressions | ForEach-Object { Convert-Expression $_ }) -join ', '))" }
         'ElementAccessExpressionSyntax' {
             if ($e.ArgumentList.Arguments.Count -ne 1) { Add-Diagnostic $e 'multidimensional index'; return '$null' }
+            $collectionType = Get-ExprType $e.Expression
+            if ($collectionType -isnot [Microsoft.CodeAnalysis.IArrayTypeSymbol] -and -not (Test-String $collectionType) -and $collectionType.OriginalDefinition.ToString() -cne 'System.Collections.Generic.List<T>') { Add-Diagnostic $e 'index requires array, string or List<T>'; return '$null' }
             return "(Get-CS2PSElement ($(Convert-Expression $e.Expression)) ($(Convert-Expression $e.ArgumentList.Arguments[0].Expression)))"
         }
         'ObjectCreationExpressionSyntax' {
             if ($e.Initializer) { Add-Diagnostic $e 'object/collection initializer'; return '$null' }
+            if (Test-Nullable (Get-ExprType $e)) {
+                if ($e.ArgumentList.Arguments.Count -eq 0) { return '$null' }
+                return Convert-Value $e.ArgumentList.Arguments[0].Expression
+            }
             if (Test-SourceType (Get-ExprType $e)) {
                 $sym = $script:Model.GetSymbolInfo($e).Symbol
                 $args_ = for ($i = 0; $i -lt $sym.Parameters.Length; $i++) { '-'+(Get-VariableName $sym.Parameters[$i])+' ('+(Convert-Expression $e.ArgumentList.Arguments[$i].Expression)+')' }
@@ -627,6 +798,16 @@ function Convert-Expression($e) {
         'InvocationExpressionSyntax' {
             $args_ = ($e.ArgumentList.Arguments | ForEach-Object { Convert-Argument $_ }) -join ', '
             $sym = $script:Model.GetSymbolInfo($e).Symbol
+            if ($sym.ReducedFrom) { Add-Diagnostic $e 'reduced extension method invocation'; return '$null' }
+            if (Test-Nullable $sym.ContainingType) {
+                $receiver = Convert-Expression $e.Expression.Expression
+                if ($sym.Name -ceq 'GetValueOrDefault') {
+                    $default = if ($e.ArgumentList.Arguments.Count) { Convert-Value $e.ArgumentList.Arguments[0].Expression } else { Get-DefaultValue (Get-UnderlyingType $sym.ContainingType) }
+                    return "(Get-CS2PSNullableDefault ($receiver) ($default))"
+                }
+                if ($sym.Name -ceq 'ToString' -and -not $e.ArgumentList.Arguments.Count) { return "[string]::Concat([object]($receiver))" }
+                Add-Diagnostic $e 'nullable method other than GetValueOrDefault/ToString'; return '$null'
+            }
             if (-not (Test-SourceType $sym.ContainingType) -and $e.Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax] -and (Test-SourceType (Get-ExprType $e.Expression.Expression))) {
                 Add-Diagnostic $e 'inherited runtime methods on source classes/structs'; return '$null'
             }
@@ -640,14 +821,43 @@ function Convert-Expression($e) {
                 for ($i = 0; $i -lt $sym.Parameters.Length; $i++) { $parts += '-'+(Get-VariableName $sym.Parameters[$i])+' ('+(Convert-Argument $e.ArgumentList.Arguments[$i])+')' }
                 return "($(Get-MethodFunction $sym) $($parts -join ' '))"
             }
+            if ($sym.IsGenericMethod -or @($e.ArgumentList.Arguments | Where-Object { $_.NameColon }).Count -or @($sym.Parameters | Where-Object { $_.RefKind.ToString() -notin 'None','Ref','Out' }).Count -or @($sym.Parameters | Where-Object { $_.RefKind.ToString() -in 'Ref','Out' }).Count -gt 1) { Add-Diagnostic $e 'generic/named/in runtime invocation or multiple runtime ref arguments'; return '$null' }
             if ($e.Expression -is [Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax]) {
-                if ($sym -and $sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$($sym.Name)($args_)" }
-                return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression.Expression))).$($e.Expression.Name.Identifier.Text)($args_)"
+                $types = @($sym.Parameters | ForEach-Object {
+                    $typeName = '[' + (Get-PsTypeName $_.Type) + ']'
+                    if ($_.RefKind.ToString() -ne 'None') { '(' + $typeName + ').MakeByRefType()' } else { $typeName }
+                })
+                $values = @($e.ArgumentList.Arguments | ForEach-Object { Convert-Argument $_ })
+                if ($sym.Parameters.Length -and $sym.Parameters[-1].IsParams) {
+                    if ($sym.Parameters[-1].Type.IsRefLikeType) {
+                        if ($sym.ContainingType.SpecialType.ToString() -eq 'System_String' -and $sym.Name -ceq 'Format' -and $sym.Parameters[-1].Type.TypeArguments[0].SpecialType.ToString() -eq 'System_Object') {
+                            # Expanded .NET 11 params spans use the equivalent object[] formatting overload.
+                            $types[-1] = '[object[]]'
+                        } else { Add-Diagnostic $e 'runtime params span requires a supported lowering'; return '$null' }
+                    }
+                    $fixed = $sym.Parameters.Length - 1
+                    $explicitArray = $values.Count -eq $sym.Parameters.Length -and (Get-ExprType $e.ArgumentList.Arguments[-1].Expression) -is [Microsoft.CodeAnalysis.IArrayTypeSymbol]
+                    if (-not $explicitArray) {
+                        $tail = @(); for ($i = $fixed; $i -lt $values.Count; $i++) { $tail += $values[$i] }
+                        $head = @(); for ($i = 0; $i -lt $fixed; $i++) { $head += $values[$i] }
+                        $values = $head + @((New-ArgumentArray $tail))
+                    }
+                }
+                if ($values.Count -ne $sym.Parameters.Length) { Add-Diagnostic $e 'optional runtime arguments'; return '$null' }
+                $receiver = if ($sym.IsStatic) { '$null' } else { Convert-Expression $e.Expression.Expression }
+                $static = if ($sym.IsStatic) { '$true' } else { '$false' }
+                return "(Invoke-CS2PSRuntime ([$(Get-PsTypeName $sym.ContainingType)]) ($receiver) '$($sym.Name)' ([type[]]@($($types -join ', '))) ($(New-ArgumentArray $values)) $static)"
             }
-            Add-Diagnostic $e "call to $($e.Expression) is not supported yet"; return "# cs2ps: unsupported call $e"
+            Add-Diagnostic $e 'unsupported invocation form'; return '$null'
         }
         'MemberAccessExpressionSyntax' {
             $sym = $script:Model.GetSymbolInfo($e).Symbol
+            if (Test-Nullable $sym.ContainingType) {
+                $receiver = Convert-Expression $e.Expression
+                if ($sym.Name -ceq 'HasValue') { return "(`$null -ne ($receiver))" }
+                if ($sym.Name -ceq 'Value') { return "(Get-CS2PSNullableValue ($receiver))" }
+                Add-Diagnostic $e 'unsupported nullable member'; return '$null'
+            }
             if ($sym.Kind.ToString() -eq 'Field' -and (Test-SourceType $sym.ContainingType)) {
                 if ($sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$((Get-FieldName $sym))" }
                 return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression))).$(Get-FieldName $sym)"
@@ -655,7 +865,7 @@ function Convert-Expression($e) {
             if ($sym -and $sym.IsStatic) { return "[$(Get-PsTypeName $sym.ContainingType)]::$($sym.Name)" }
             return "(Get-CS2PSReceiver ($(Convert-Expression $e.Expression))).$($e.Name.Identifier.Text)"
         }
-        default { Add-Diagnostic $e "expression $($e.GetType().Name) is not supported yet"; return "<# cs2ps: unsupported $($e.GetType().Name) #>" }
+        default { Add-Diagnostic $e "expression $($e.GetType().Name) is not supported yet"; return "<# CS2PS: unsupported $($e.GetType().Name) #>" }
     }
 }
 
@@ -664,6 +874,32 @@ function Convert-Binary($e) {
     $lt = Get-ExprType $e.Left; $rt = Get-ExprType $e.Right
     $op = $e.OperatorToken.Text
     $strings = (Test-String $lt) -or (Test-String $rt)
+    if ($op -in '==','!=' -and (($lt -and $lt.IsReferenceType) -or ($rt -and $rt.IsReferenceType))) {
+        $operation = $script:Model.GetOperation($e, [Threading.CancellationToken]::None)
+        if ($operation.LeftOperand.Type.SpecialType.ToString() -eq 'System_String') { $test = "(Test-CS2PSConstant ($l) ($r))" }
+        else { $test = "[object]::ReferenceEquals($l, $r)" }
+        if ($op -eq '!=') { return "(-not ($test))" }; return "($test)"
+    }
+    if ($op -eq '??') {
+        $value = "`$coalesce$($e.Span.Start)"
+        $resultType = Get-ExprType $e
+        $nonNull = if ((Test-Integral $resultType) -or (Test-Floating $resultType)) { "[$(Get-PsTypeName $resultType)]$value" } else { $value }
+        return "`$($value = $l; if (`$null -eq $value) { ,($r) } else { ,($nonNull) })"
+    }
+    if ((Test-Nullable $lt) -or (Test-Nullable $rt)) {
+        $type = Get-UnderlyingType (Get-ExprType $e)
+        if ($op -in '==','!=','<','>','<=','>=') {
+            $operation = $script:Model.GetOperation($e, [Threading.CancellationToken]::None)
+            $type = Get-UnderlyingType $operation.LeftOperand.Type
+            if (-not $type) { $type = Get-UnderlyingType $operation.RightOperand.Type }
+        }
+        if ($op -notin '+','-','*','/','%','&','|','^','<<','>>','>>>','==','!=','<','>','<=','>=') { Add-Diagnostic $e 'unsupported lifted operator'; return '$null' }
+        return "(Invoke-CS2PSNullableBinary ($l) ($r) '$op' '$(Get-PsTypeName $type)' $(Get-CheckedFlag $e))"
+    }
+    if (($op -in '+','-','*','/','%','==','!=','<','>','<=','>=') -and ((Test-Floating $lt) -or (Test-Floating $rt))) {
+        $operation = $script:Model.GetOperation($e, [Threading.CancellationToken]::None)
+        return "(Invoke-CS2PSNumber ($l) ($r) '$op' '$(Get-PsTypeName $operation.LeftOperand.Type)' $(Get-CheckedFlag $e))"
+    }
     if ($op -in '==','!=','<','>','<=','>=' -and (Test-Integral $lt) -and (Test-Integral $rt)) { return "(Compare-CS2PSInteger ($l) ($r) '$op')" }
     if ($op -in '&','|','^' -and (Get-ExprType $e).SpecialType.ToString() -eq 'System_Boolean') { return "(Invoke-CS2PSBoolean ($l) ($r) '$op')" }
     if ($op -in '&','|','^','<<','>>','>>>' -and (Test-Integral (Get-ExprType $e))) { return "(Invoke-CS2PSInteger ($l) ($r) '$op' '$(Get-PsTypeName (Get-ExprType $e))' `$false)" }
@@ -686,17 +922,20 @@ function Convert-Binary($e) {
         '&&' { return "$l -and $r" } '||' { return "$l -or $r" }
         '&' { return "$l -band $r" } '|' { return "$l -bor $r" } '^' { return "$l -bxor $r" }
         '<<' { return "$l -shl $r" } '>>' { return "$l -shr $r" }
-        default { Add-Diagnostic $e "operator $op is not supported yet"; return "<# cs2ps: operator $op #>" }
+        default { Add-Diagnostic $e "operator $op is not supported yet"; return "<# CS2PS: operator $op #>" }
     }
 }
 
 function Convert-Increment($e, [bool] $postfix) {
     $type = Get-ExprType $e.Operand
+    $nullable = Test-Nullable $type
+    $type = Get-UnderlyingType $type
     if (-not (Test-Integral $type)) { Add-Diagnostic $e 'increment requires an integral local, parameter or simple field'; return '$null' }
-    if ($e.Operand -is [Microsoft.CodeAnalysis.CSharp.Syntax.ElementAccessExpressionSyntax] -or @($e.Operand.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax] }).Count) { Add-Diagnostic $e 'increment with effectful lvalue'; return '$null' }
+    if (-not (Test-SimpleLValue $e.Operand)) { Add-Diagnostic $e 'increment with effectful lvalue'; return '$null' }
     $left = Convert-Expression $e.Operand
     $old = "`$old$($e.Span.Start)"
     $op = if ($e.OperatorToken.Text -eq '++') { '+' } else { '-' }
     $value = if ($postfix) { $old } else { $left }
-    return "`$($old = $left; $left = (Invoke-CS2PSInteger ($old) 1 '$op' '$(Get-PsTypeName $type)' $(Get-CheckedFlag $e)); $value)"
+    $helper = if ($nullable) { 'Invoke-CS2PSNullableBinary' } else { 'Invoke-CS2PSInteger' }
+    return "`$($old = $left; $left = ($helper ($old) 1 '$op' '$(Get-PsTypeName $type)' $(Get-CheckedFlag $e)); $value)"
 }

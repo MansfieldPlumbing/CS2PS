@@ -6,9 +6,9 @@ and uses Roslyn's semantic model to make every meaning difference explicit:
 
 | C# | PowerShell that would differ | What CS2PS emits |
 |---|---|---|
-| `a / b` on integers truncates | `$a / $b` returns a double | `[Math]::DivRem($a, $b).Item1` |
-| `(int)x` on a double truncates | `[int]$x` rounds half to even | `[int][Math]::Truncate($x)` |
-| `a == b` on strings is case-sensitive | `-eq` ignores case | `-ceq` (and `-cne`, `-clt`, ...) |
+| `a / b` on integers truncates | `$a / $b` returns a double | Exact integer division in `Invoke-CS2PSInteger`, with a typed result |
+| `(int)x` on a double truncates | `[int]$x` rounds half to even | Explicit checked conversion or .NET 9+ saturating truncation |
+| String equality is ordinal | Even case-sensitive cultural comparisons differ | Null-aware `[string]::Equals(..., Ordinal)` |
 | `"s" + n` concatenates | `+` may add numerically | `[string]::Concat(...)` |
 
 Static methods become advanced functions with typed parameters and
@@ -28,6 +28,7 @@ build depends on CS2PS or Roslyn.
 $r = ConvertFrom-CSharp -Path ./Some.cs
 $r.PowerShell      # the generated functions
 $r.Diagnostics     # unsupported constructs, with line numbers
+$r.Methods         # source methods, generated function names and parameter names
 ```
 
 ## Verification
@@ -44,10 +45,13 @@ output and exception types. Generated scripts are parsed before loading.
 output for unsupported input. Full Language Mode is required for Roslyn's
 managed semantic API and the comparison assembly; no protection is disabled.
 
-The loop fixtures are extracted from MIT-licensed `dotnet/roslyn` at commit
+The upstream fixtures are extracted from MIT-licensed `dotnet/roslyn` at commit
 `ac3aeb5c871a6bac2369a9fa9d2b2f5b27f9d9da`; fixture headers cite exact source
 locations, upstream file hashes and test names. `ROSLYN-LICENSE.txt` retains
-the license. Supplemental fixtures cover boundary behavior.
+the license. `provenance.json` records immutable Git blob identities and
+SHA-256 digests, verified against exact upstream literals. The harness checks
+these fixture hashes before compiling or loading code. Supplemental fixtures
+cover boundary behavior.
 
 | C# | PowerShell difference | Explicit translation |
 |---|---|---|
@@ -69,20 +73,50 @@ the license. Supplemental fixtures cover boundary behavior.
 | Boolean `&` / `\|` / `^` | `-and` / `-or` short-circuit | Evaluate both operands before combining |
 | `char` arithmetic and comparison | PowerShell may treat characters as text | UTF-16 numeric promotion, ordinal comparison, checked overflow or 16-bit wrapping |
 | Exceptions, typed catches, rethrow and `finally` | PowerShell wraps runtime exceptions | Unwrap invocation wrappers, dispatch catches in order, retain rethrow and finally control flow; null throws become `NullReferenceException` |
+| Nullable value types | Null coercion, members and lifted operators differ | Null-or-boxed-value storage, explicit `HasValue`/`Value`, lifted arithmetic/comparison and nullable boolean truth tables |
+| `??` / `??=` | Repeated evaluation changes side effects | Evaluate the left side once and the fallback only when null |
+| Floating arithmetic | Division by zero and NaN comparisons differ | IEEE zero division and comparisons, with typed rounding at each operation |
+| Runtime overload resolution | PowerShell uses runtime argument types | Invoke the exact signature selected by Roslyn, including single `out`/`ref` arguments |
+| Reference equality | PowerShell may compare values or enumerate arrays | `[object]::ReferenceEquals` for class, array and object comparisons |
 
 ## Supported now
 
-Static methods; parameters and locals of simple types; `if`/`else`, `for`,
-`foreach`, `while`, `break`, `continue`, `return`; assignment, compound
-assignment, `++`/`--`; arithmetic, comparison, logical, bitwise and
-conditional expressions; casts; calls to static .NET members and to instance
-members of values.
+Fixture-backed support includes `for`/`while` and array/List `foreach`;
+constant-case switch statements and constant/discard switch expressions;
+simple class fields, constructors and instance methods; simple struct value
+copies; local/parameter `out` and `ref`; interpolation and composite formatting;
+checked/unchecked integer arithmetic and numeric casts; bit operations and
+shifts; UTF-16 character arithmetic; throw/catch/rethrow/finally; and nullable
+primitive values, lifted operators and coalescing. Fields, functions and
+variables are named from their symbols so case-only distinctions survive.
+Primitive numeric types, bool, string, object, arrays and `List<T>` are typed
+according to Roslyn. String and nullable storage preserves null explicitly.
 
-## Next
+## Boundaries
 
-Instance classes as PowerShell classes or records plus functions; properties
-and fields; `switch`; `try`/`catch`/`finally`; arrays and collections;
-`out`/`ref`; nested types (flattened); iterators (lists); LINQ (loops);
-string interpolation; checked and unchecked integer overflow. First real
-input: PowerShell's ConsoleHost progress layout (`PendingProgress.cs`,
-`ProgressNode.cs`).
+Unsupported input produces line-numbered diagnostics and marked output that
+throws before any translated code runs. This includes properties, inheritance,
+interfaces, enums, records, generic source types/methods, attributes, iterators,
+LINQ, exception filters, readonly/volatile/const fields, static field
+initializers, constructor chaining, source-struct arrays and nullable source
+structs. Source calls require explicit positional arguments; runtime generic,
+named, optional and multiple-by-reference calls are diagnostics. Expanded
+`string.Format` params spans use the equivalent `object[]` overload.
+Compound assignments and increments with effectful lvalues are diagnostics.
+
+The verified toolchain is PowerShell `7.7.0-preview.5` on .NET
+`11.0.0-rc.1.26425.128`, Windows x64. Numeric behavior follows this runtime,
+including floating-to-integer saturation and minimum-integer remainder
+overflow. Full Language Mode and path-based assembly loading are required;
+the translator never compiles C# to implement a translation. Only the test
+harness builds a comparison assembly, and all generated scripts, assemblies
+and logs remain in ignored `build/`.
+
+Semantic references: the C# specification's
+[statements](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/statements),
+[expressions](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/expressions),
+[structs](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/structs)
+and [types](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/types);
+the .NET documentation for
+[floating-to-integer saturation](https://learn.microsoft.com/en-us/dotnet/core/compatibility/jit/9.0/fp-to-integer)
+and [integer remainder](https://learn.microsoft.com/en-us/dotnet/api/system.reflection.emit.opcodes.rem).

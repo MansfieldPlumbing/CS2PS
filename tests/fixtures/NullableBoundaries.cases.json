@@ -1,0 +1,619 @@
+[
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "Add",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      2
+    ],
+    "Method": "Add",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      null
+    ],
+    "Method": "Add",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      3
+    ],
+    "Method": "Add",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      2
+    ],
+    "Method": "Add",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "Equal",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      2
+    ],
+    "Method": "Equal",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      null
+    ],
+    "Method": "Equal",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      3
+    ],
+    "Method": "Equal",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      2
+    ],
+    "Method": "Equal",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "Less",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      2
+    ],
+    "Method": "Less",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      null
+    ],
+    "Method": "Less",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      3
+    ],
+    "Method": "Less",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      2
+    ],
+    "Method": "Less",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "Divide",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      2
+    ],
+    "Method": "Divide",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      null
+    ],
+    "Method": "Divide",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      3
+    ],
+    "Method": "Divide",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      2,
+      2
+    ],
+    "Method": "Divide",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Has",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Has",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Value",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Value",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Zero",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Zero",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Coalesce",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Coalesce",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Increment",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Increment",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Negate",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Negate",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Cast",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Cast",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Widen",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Widen",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Assign",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Assign",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Text",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "Text",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "DefaultEvaluation",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7
+    ],
+    "Method": "DefaultEvaluation",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      9
+    ],
+    "Method": "Default",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      7,
+      9
+    ],
+    "Method": "Default",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      false
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      true
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      null
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      false
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      true
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      null
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      false
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      true
+    ],
+    "Method": "And",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      false
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      true
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      null
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      false
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      true
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      null
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      false
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      true
+    ],
+    "Method": "Or",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      false
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      true
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      null
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      false
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false,
+      true
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      null
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      false
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true,
+      true
+    ],
+    "Method": "Xor",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null
+    ],
+    "Method": "Not",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      false
+    ],
+    "Method": "Not",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      true
+    ],
+    "Method": "Not",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [],
+    "Method": "Eager",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [],
+    "Method": "Empty",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      0
+    ],
+    "Method": "Floating",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      1,
+      0
+    ],
+    "Method": "Floating",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      0,
+      0
+    ],
+    "Method": "Floating",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      "NaN",
+      "NaN"
+    ],
+    "Method": "FloatingEqual",
+    "Type": "NullableBoundaries"
+  },
+  {
+    "Arguments": [
+      null,
+      null
+    ],
+    "Method": "FloatingEqual",
+    "Type": "NullableBoundaries"
+  }
+]

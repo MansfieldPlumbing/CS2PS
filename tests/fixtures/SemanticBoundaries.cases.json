@@ -1,0 +1,16 @@
+[
+ {"Type":"SemanticBoundaries","Method":"Text","Arguments":["é","é"]},
+ {"Type":"SemanticBoundaries","Method":"Text","Arguments":[null,""]},
+ {"Type":"SemanticBoundaries","Method":"Switch","Arguments":["é"]},
+ {"Type":"SemanticBoundaries","Method":"ArrayIdentity","Arguments":[]},
+ {"Type":"SemanticBoundaries","Method":"BoxIdentity","Arguments":[]},
+ {"Type":"SemanticBoundaries","Method":"Overload","Arguments":[]},
+ {"Type":"SemanticBoundaries","Method":"Params","Arguments":[]},
+ {"Type":"SemanticBoundaries","Method":"Single","Arguments":[0.1,0.2]},
+ {"Type":"SemanticBoundaries","Method":"Zero","Arguments":[1,0]},
+ {"Type":"SemanticBoundaries","Method":"Zero","Arguments":[0,0]},
+ {"Type":"SemanticBoundaries","Method":"Nan","Arguments":["NaN","NaN"]},
+ {"Type":"SemanticBoundaries","Method":"NanLess","Arguments":["NaN",1]},
+ {"Type":"SemanticBoundaries","Method":"Index","Arguments":["abc",1]},
+ {"Type":"SemanticBoundaries","Method":"Index","Arguments":["abc",-1]}
+]

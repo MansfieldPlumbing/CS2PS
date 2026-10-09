@@ -1,0 +1,6 @@
+[
+ {"Type":"Program","Method":"Main","Arguments":[]},
+ {"Type":"Program","Method":"bar","Arguments":[0],"Instance":true},
+ {"Type":"Program","Method":"bar","Arguments":[42],"Instance":true},
+ {"Type":"Program","Method":"test","Arguments":[],"Instance":true}
+]
