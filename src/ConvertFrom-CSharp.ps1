@@ -28,6 +28,7 @@ function ConvertFrom-CSharp {
         [Parameter(Mandatory, ParameterSetName = 'Path')] [string] $Path,
         [Parameter(Mandatory, ParameterSetName = 'Source')] [string] $Source,
         [string] $ApiCatalogPath,
+        [string[]] $Define = @(),
         [string[]] $ReferencePath = @()
     )
     Initialize-Roslyn
@@ -35,7 +36,8 @@ function ConvertFrom-CSharp {
     $script:ApiCalls = [Collections.Generic.List[object]]::new()
     if ($Path) { $Source = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path).Path) }
 
-    $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source)
+    $parseOptions = [Microsoft.CodeAnalysis.CSharp.CSharpParseOptions]::Default.WithPreprocessorSymbols($Define)
+    $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source, $parseOptions)
     $refs = [System.Collections.Generic.List[Microsoft.CodeAnalysis.MetadataReference]]::new()
     $runtimeDir = [IO.Path]::GetDirectoryName([object].Assembly.Location)
     foreach ($n in 'System.Private.CoreLib.dll', 'System.Runtime.dll', 'System.Collections.dll', 'System.Console.dll') {
@@ -66,6 +68,11 @@ function ConvertFrom-CSharp {
         return [pscustomobject]@{ PowerShell = $marked + "`nthrow [NotSupportedException]::new('C# input has compiler diagnostics.')`n"; Diagnostics = $script:Diagnostics.ToArray(); Methods = @() }
     }
     foreach ($node in $tree.GetRoot().DescendantNodes() | Where-Object { $_.GetType().Name -in 'AttributeListSyntax','EnumDeclarationSyntax','DelegateDeclarationSyntax','GlobalStatementSyntax' }) { Add-Diagnostic $node "declaration $($node.GetType().Name)" }
+    if ($script:Diagnostics.Count) {
+        # Do not descend into declarations already rejected by the subset gate.
+        $marked = ($script:Diagnostics | ForEach-Object { "# CS2PS: unsupported at line $($_.Line): $($_.Message)" }) -join "`n"
+        return [pscustomobject]@{ PowerShell=$marked + "`nthrow [NotSupportedException]::new('CS2PS translation has diagnostics.')`n"; Diagnostics=$script:Diagnostics.ToArray(); Methods=@(); Types=@(); Renames=@(); ApiCalls=@() }
+    }
 
     $out = [System.Text.StringBuilder]::new()
     $helpers = @'
@@ -1043,6 +1050,13 @@ function Convert-Expression($e) {
         }
         'InvocationExpressionSyntax' {
             $sym = $script:Model.GetSymbolInfo($e).Symbol
+            if ($sym -isnot [Microsoft.CodeAnalysis.IMethodSymbol]) {
+                $constant = $script:Model.GetConstantValue($e)
+                # nameof has a compile-time string value, not a runtime method.
+                if ($constant.HasValue -and $constant.Value -is [string]) { return "'" + $constant.Value.Replace("'", "''") + "'" }
+                Add-Diagnostic $e 'invocation has no resolved method symbol (dynamic binding is not admitted)'
+                return '$null'
+            }
             if ($sym.ReducedFrom) { Add-Diagnostic $e 'reduced extension method invocation'; return '$null' }
             if (Test-Nullable $sym.ContainingType) {
                 $receiver = Convert-Expression $e.Expression.Expression

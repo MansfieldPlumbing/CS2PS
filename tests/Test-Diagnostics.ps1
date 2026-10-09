@@ -15,7 +15,8 @@ $cases = @(
     'public struct S { public int X; } public class C { public static void F() { S[] a = new S[1]; } }',
     'public struct S { public int X; } public class C { public static void F() { S? a = null; } }',
     'public class C { public static int F() => unknown; }',
-    'public class C { public int X; public static int F(C[] a) { int i = 0; return a[i++].X++; } }'
+    'public class C { public int X; public static int F(C[] a) { int i = 0; return a[i++].X++; } }',
+    'public class C { public static object F(dynamic value) => value.Unknown(); }'
 )
 foreach ($source in $cases) {
     $result = ConvertFrom-CSharp -Source $source

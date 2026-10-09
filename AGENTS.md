@@ -20,6 +20,9 @@
 - Call emission rules and their compiler-source evidence live in
   docs/CALL-CORRESPONDENCE.md. Use the existing CallMatrix acceptance mode;
   catalog membership alone must not select an emission form.
+- Android audio/JNI/lifecycle/TTS extraction starts at docs/ANDROID-BINDINGS.md
+  and the existing AndroidBindings mode. Declaration counts are not executable
+  bindings; keep source closure, parity, lowering and device receipts separate.
 - Every supported construct carries parity cases: the translated PowerShell
   and the Roslyn-compiled original are called with the same inputs and must
   agree. A construct without parity cases is not supported.

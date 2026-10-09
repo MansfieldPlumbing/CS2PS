@@ -1,7 +1,7 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix')] [string] $Mode = 'Verify',
+    [ValidateSet('Verify','Measure','Golden','Baseline','Upstream','ApiCatalog','ApiQuery','CallMatrix','AndroidBindings')] [string] $Mode = 'Verify',
     [switch] $CaptureCallBaseline,
     [string] $ApiCatalogPath,
     [string] $ApiPattern = 'M:System.String.Substring*',
@@ -98,6 +98,174 @@ function Import-PinnedLowering {
     if ($integrity.Commit -cne $pin) { throw 'PSLowering integrity revision mismatch.' }
     foreach ($record in $integrity.Files) { if ((Get-FileHash -LiteralPath (Join-Path $cache $record.Path)).Hash -cne $record.SHA256) { throw "PSLowering digest mismatch: $($record.Path)" } }
     Import-Module (Join-Path $cache 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1') -Force -Global
+}
+if ($Mode -eq 'AndroidBindings') {
+    $pin = '37f8b4a65cf7eb1fca9808ea7b724e5db1e7dba5'
+    $vendor = 'C:/Dev/.vendor/dotnet-android'
+    $directory = Join-Path $build 'android-bindings'
+    $cache = Join-Path $build "cache/android-bindings/$pin"
+    $null = [IO.Directory]::CreateDirectory($cache)
+    $integrityPath = Join-Path $cache 'integrity.json'
+    if (-not (Test-Path -LiteralPath $integrityPath)) {
+        $available = @(& git -C $vendor ls-tree -r --name-only $pin src/Mono.Android external/Java.Interop/src/Java.Interop external/Java.Interop/src/Java.Interop.Tools.TypeNameMappings)
+        if ($LASTEXITCODE) { throw 'Pinned Android binding source is unavailable.' }
+        $paths = @('LICENSE.TXT','external/Java.Interop/LICENSE','external/Java.Interop/ThirdPartyNotices.txt','src/Mono.Android/Profiles/api-36.xml','src/Mono.Android/Mono.Android.csproj') + @($available | Where-Object {
+            $_ -match '^src/Mono.Android/Android.Media/(Audio.*|MediaPlayer|ToneGenerator)\.cs$' -or
+            $_ -match '^src/Mono.Android/Android.App/(Activity|ActivityTracker|Application|IntentService|SyncContext)\.cs$' -or
+            $_ -match '^src/Mono.Android/Android.OS/(Handler|Message)\.cs$' -or
+            $_ -match '^src/Mono.Android/Android.Runtime/(JNIEnv|JNIEnvInit|JNINativeWrapper|JValue|JniHandleOwnership|RuntimeNativeMethods|DynamicMethodNameCounter)\.cs$' -or
+            $_ -match '^external/Java.Interop/src/Java.Interop/Java.Interop/(JniEnvironment(\.(Strings|References|Types|Object|Errors|Monitors|Members.Utf8))?|JniTypeSignature|JniArgumentValue|JniObjectReference|JniMethodInfo|JniNativeMethodRegistration)\.cs$' -or
+            $_ -match '/Java.Interop.Tools.TypeNameMappings/JavaNativeTypeManager\.cs$'
+        })
+        $archive = Join-Path $cache 'source.tar'
+        & git -C $vendor archive --format=tar --output $archive $pin -- @paths
+        if ($LASTEXITCODE) { throw 'Pinned source acquisition failed.' }
+        & tar.exe -xf $archive -C $cache
+        if ($LASTEXITCODE) { throw 'Pinned source extraction failed.' }
+        $integrity = @{Repository='https://github.com/dotnet/android';Commit=$pin;ArchiveSHA256=(Get-FileHash -LiteralPath $archive).Hash;Files=@($paths | ForEach-Object { @{Path=$_;SHA256=(Get-FileHash -LiteralPath (Join-Path $cache $_)).Hash} })}
+        Save-Text $integrityPath ($integrity | ConvertTo-Json -Depth 6)
+    }
+    $integrity = Get-Content -Raw -LiteralPath $integrityPath | ConvertFrom-Json
+    $licensePaths = @('external/Java.Interop/LICENSE','external/Java.Interop/ThirdPartyNotices.txt')
+    if (@($licensePaths | Where-Object {$_ -notin $integrity.Files.Path}).Count) {
+        $licenseArchive = Join-Path $cache 'licenses.tar'
+        & git -C $vendor archive --format=tar --output $licenseArchive $pin -- @licensePaths
+        if ($LASTEXITCODE) { throw 'Pinned Java.Interop license acquisition failed.' }
+        & tar.exe -xf $licenseArchive -C $cache
+        if ($LASTEXITCODE) { throw 'Pinned Java.Interop license extraction failed.' }
+        $integrity.Files = @($integrity.Files) + @($licensePaths | Where-Object {$_ -notin $integrity.Files.Path} | ForEach-Object { @{Path=$_;SHA256=(Get-FileHash -LiteralPath (Join-Path $cache $_)).Hash} })
+        Save-Text $integrityPath ($integrity | ConvertTo-Json -Depth 6)
+    }
+    if ($integrity.Commit -cne $pin -or (Get-FileHash -LiteralPath (Join-Path $cache 'source.tar')).Hash -cne $integrity.ArchiveSHA256) { throw 'Android source archive identity mismatch.' }
+    foreach ($record in $integrity.Files) { if ((Get-FileHash -LiteralPath (Join-Path $cache $record.Path)).Hash -cne $record.SHA256) { throw "Android source digest mismatch: $($record.Path)" } }
+    foreach ($license in @{ 'LICENSE.TXT'='LICENSE.dotnet-android.txt'; 'external/Java.Interop/LICENSE'='LICENSE.Java.Interop.txt'; 'external/Java.Interop/ThirdPartyNotices.txt'='ThirdPartyNotices.Java.Interop.txt' }.GetEnumerator()) {
+        Save-Text (Join-Path $directory $license.Value) ([IO.File]::ReadAllText((Join-Path $cache $license.Key)))
+    }
+    # The API XML is the generator's declaration input, including TTS. It is
+    # not executable C# and does not establish reference ownership or behavior.
+    $apiPath = Join-Path $cache 'src/Mono.Android/Profiles/api-36.xml'
+    $settings = [Xml.XmlReaderSettings]::new(); $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+    $reader = [Xml.XmlReader]::Create($apiPath,$settings)
+    $api = [Xml.XmlDocument]::new(); $api.XmlResolver = $null
+    try { $api.Load($reader) } finally { $reader.Dispose() }
+    $targets = [ordered]@{
+        Audio=@('android.media.AudioTrack','android.media.AudioRecord','android.media.AudioManager','android.media.AudioAttributes','android.media.AudioFormat','android.media.MediaPlayer','android.media.SoundPool')
+        Lifecycle=@('android.app.Activity','android.app.Application','android.app.Service','android.app.NativeActivity','android.os.Handler','android.os.Looper','android.app.Application.ActivityLifecycleCallbacks')
+        TTS=@('android.speech.tts.TextToSpeech','android.speech.tts.TextToSpeech.OnInitListener','android.speech.tts.UtteranceProgressListener','android.speech.tts.TextToSpeechService','android.speech.tts.SynthesisRequest','android.speech.tts.SynthesisCallback','android.speech.tts.Voice')
+    }
+    $bindings = [Collections.Generic.List[object]]::new()
+    $classes = [Collections.Generic.List[object]]::new()
+    foreach ($family in $targets.Keys) {
+        foreach ($name in $targets[$family]) {
+            $type = @($api.SelectNodes('/api/package/class | /api/package/interface') | Where-Object { ($_.ParentNode.GetAttribute('name') + '.' + $_.GetAttribute('name')) -ceq $name })
+            if ($type.Count -ne 1) { throw "Android API target is absent or ambiguous: $name" }
+            $classes.Add(@{Family=$family;Type=$name;JniType=$type[0].GetAttribute('jni-signature');BaseType=$type[0].GetAttribute('extends');Interfaces=$type[0].GetAttribute('implements');Members=$type[0].SelectNodes('method | constructor | field').Count})
+            foreach ($member in $type[0].SelectNodes('method | constructor | field')) {
+                $bindings.Add(@{Family=$family;Type=$name;Kind=$member.LocalName;Name=$member.GetAttribute('name');JniSignature=$member.GetAttribute('jni-signature');Static=$member.GetAttribute('static');Visibility=$member.GetAttribute('visibility');ReturnType=$member.GetAttribute('return');Value=$member.GetAttribute('value');Parameters=@($member.SelectNodes('parameter') | ForEach-Object { @{Name=$_.GetAttribute('name');Type=$_.GetAttribute('type')} });Status='DeclarationOnly';Source='src/Mono.Android/Profiles/api-36.xml'})
+            }
+        }
+    }
+    Save-Text (Join-Path $directory 'api-36-bindings.json') (@{Commit=$pin;Platform=$api.DocumentElement.GetAttribute('platform');SourceSHA256=(Get-FileHash -LiteralPath $apiPath).Hash;Classes=@($classes);Members=@($bindings)} | ConvertTo-Json -Depth 10)
+    [string[]] $defines = @('NET','JAVA_INTEROP','ENABLE_MARSHAL_METHODS') + @(1..36 | ForEach-Object {"ANDROID_$_"})
+    $parseOptions = [Microsoft.CodeAnalysis.CSharp.CSharpParseOptions]::Default.WithPreprocessorSymbols($defines)
+    $references = @('System.Threading.dll','System.Threading.Thread.dll','System.Linq.dll','System.Memory.dll','System.Reflection.Emit.dll','System.Reflection.Emit.ILGeneration.dll','System.Collections.Concurrent.dll','System.Runtime.InteropServices.dll','System.ObjectModel.dll','System.Diagnostics.Debug.dll' | ForEach-Object { Join-Path $PSHOME $_ } | Where-Object {Test-Path -LiteralPath $_})
+    foreach ($referenceRoot in $ReferencePath) {
+        $resolved = (Resolve-Path -LiteralPath $referenceRoot).Path
+        if ($resolved.TrimEnd('\','/') -ieq $PSHOME.TrimEnd('\','/')) { continue }
+        if (Test-Path -LiteralPath $resolved -PathType Container) { $references += @(Get-ChildItem -LiteralPath $resolved -Filter '*.dll' -File | ForEach-Object FullName) }
+        else { $references += $resolved }
+    }
+    $attempts = [Collections.Generic.List[object]]::new()
+    $sourceMethods = [Collections.Generic.List[object]]::new()
+    foreach ($record in $integrity.Files | Where-Object Path -Like '*.cs') {
+        $path = Join-Path $cache $record.Path
+        $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText([IO.File]::ReadAllText($path),$parseOptions)
+        foreach ($node in $tree.GetRoot().DescendantNodes() | Where-Object {$_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax]}) {
+            $name = if ($node -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax]) {$node.Identifier.ValueText} else {$node.GetType().Name}
+            $sourceMethods.Add(@{Source=$record.Path;Line=$node.GetLocation().GetLineSpan().StartLinePosition.Line+1;Name=$name;Parameters=$node.ParameterList.ToString();Unsafe='unsafe' -in @($node.Modifiers | ForEach-Object Text);Generic=$node -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] -and $null -ne $node.TypeParameterList;Extern='extern' -in @($node.Modifiers | ForEach-Object Text);HasBody=$null -ne $node.Body -or $null -ne $node.ExpressionBody})
+        }
+        $translationException = $null
+        try { $result = ConvertFrom-CSharp -Path $path -Define $defines -ReferencePath $references }
+        catch { $translationException = $_.Exception.Message; $result = [pscustomobject]@{PowerShell="throw [NotSupportedException]::new('CS2PS translation failed; see source-inventory.json.')`n";Diagnostics=@()} }
+        $compilerErrors = @($script:Model.Compilation.GetDiagnostics() | Where-Object Severity -eq Error | ForEach-Object { @{Id=$_.Id;Line=$_.Location.GetLineSpan().StartLinePosition.Line+1;Message=$_.GetMessage()} })
+        $errors = @($result.Diagnostics | Where-Object Severity -ne Information)
+        $status = if ($translationException) {'TranslatorFailure'} elseif ($compilerErrors.Count) {'CSharpBindingBlocked'} elseif ($errors.Count) {'TranslationBlocked'} elseif (-not $result.Methods.Count) {'NoExecutableMethods'} else {'TranslatedUnverified'}
+        $output = Join-Path $directory ('attempts/' + $record.Path + '.ps1')
+        Save-Text $output $result.PowerShell
+        $attempts.Add(@{Source=$record.Path;SHA256=$record.SHA256;Status=$status;CompilerErrors=$compilerErrors;Diagnostics=@($result.Diagnostics);TranslatorFailure=$translationException;Output=$output;Parity='NotRun';Lowering='NotRun'})
+    }
+    Save-Text (Join-Path $directory 'source-inventory.json') (@{Commit=$pin;Defines=$defines;References=@($references | ForEach-Object {@{Path=$_;SHA256=(Get-FileHash -LiteralPath $_).Hash}});Scope='Selected source files, each translated independently; not an SDK dependency closure';Methods=@($sourceMethods);Attempts=@($attempts)} | ConvertTo-Json -Depth 10)
+    # First independently executable upstream logic. Original method declarations
+    # and bodies are preserved in a minimal comparison host; no Android stubs.
+    $typeNamePath = @($integrity.Files | Where-Object Path -Like '*/JavaNativeTypeManager.cs')[0].Path
+    $typeNameTree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText([IO.File]::ReadAllText((Join-Path $cache $typeNamePath)),$parseOptions)
+    $selection = @($typeNameTree.GetRoot().DescendantNodes() | Where-Object {
+        $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] -and
+        ($_.Identifier.ValueText -in 'ToPascalCase','IsPackageNamePreservedForAssembly' -or
+        ($_.Identifier.ValueText -ceq 'ToJniName' -and $_.ParameterList.Parameters.Count -eq 2 -and $_.ParameterList.Parameters[0].Type.ToString() -ceq 'string'))
+    })
+    if ($selection.Count -ne 3) { throw 'Upstream JNI naming selection changed.' }
+    $slicePath = Join-Path $directory 'JavaNativeTypeManager.cs'
+    Save-Text $slicePath ("// Original method bodies: dotnet/android $pin $typeNamePath`nusing System;`npublic static class JavaNativeTypeManager {`n" + (($selection | ForEach-Object ToString) -join "`n") + "`n}`n")
+    $cases = [Collections.Generic.List[object]]::new()
+    foreach ($pair in @(@($null,0),@($null,1),@('',0),@('',1),@('I',0),@('I',1),@('I',2),@('java/lang/String',1),@('[I',1),@('Ljava/lang/String;',2),@('I',-1))) { $cases.Add(@{Type='JavaNativeTypeManager';Method='ToJniName';Arguments=$pair}) }
+    foreach ($pair in @(@($null,2),@('',2),@('a',2),@('ab',2),@('aBC',2),@('i',1),@('éclair',2),@('x',0),@('value',-1))) { $cases.Add(@{Type='JavaNativeTypeManager';Method='ToPascalCase';Arguments=$pair}) }
+    foreach ($value in @($null,'','Mono.Android','mono.android','System.Private.CoreLib')) { $cases.Add(@{Type='JavaNativeTypeManager';Method='IsPackageNamePreservedForAssembly';Arguments=@($value)}) }
+    Save-Text (Join-Path $directory 'JavaNativeTypeManager.cases.json') ($cases | ConvertTo-Json -Depth 5)
+    $slice = ConvertFrom-CSharp -Path $slicePath
+    if (@($slice.Diagnostics | Where-Object Severity -ne Information).Count) { throw "Upstream JNI helper translation failed: $($slice.Diagnostics | ConvertTo-Json -Compress)" }
+    $psPath = Join-Path $directory 'JavaNativeTypeManager.ps1'
+    Save-Text $psPath $slice.PowerShell
+    Import-PinnedLowering
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($psPath,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw 'Upstream JNI helper SMA parse failed.' }
+    $admission = @(foreach ($method in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionMemberAst] -and -not $node.IsConstructor},$true)) {
+        try { $null = ConvertTo-TypedExpression -MethodAst $method; @{Method=$method.Name;Status='Admitted';Reason=''} } catch { @{Method=$method.Name;Status='Rejected';Reason=$_.Exception.Message} }
+    })
+    foreach ($culture in 'en-US','fr-FR') {
+        & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Fixture $slicePath -Culture $culture
+        if ($LASTEXITCODE) { throw "JNI naming parity failed: $culture" }
+        & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $PSScriptRoot 'Test-Parity.ps1') -Fixture (Join-Path $PSScriptRoot 'android/ConditionalBinding.cs') -Culture $culture -Define ANDROID_36
+        if ($LASTEXITCODE) { throw "Android define parity failed: $culture" }
+    }
+    $admittedNames = @($admission | Where-Object {$_.Status -eq 'Admitted'} | ForEach-Object {$_.Method})
+    $loweredReceipt = $null
+    if ($admittedNames.Count) {
+        $loweredPath = Join-Path $directory 'JavaNativeTypeManager.lowered.dll'
+        $null = Export-LoweredAssembly -SourcePath $psPath -ClassName JavaNativeTypeManager -MethodNames $admittedNames -OutputPath $loweredPath
+        $loweredAssembly = [Reflection.Assembly]::LoadFrom($loweredPath)
+        $oracleFile = Get-ChildItem -LiteralPath $build -Filter 'JavaNativeTypeManager.reference.*.dll' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        $oracleAssembly = [Reflection.Assembly]::LoadFrom($oracleFile.FullName)
+        $loweredCases = @($cases | Where-Object {$_.Method -in $admittedNames})
+        $priorCulture = [Globalization.CultureInfo]::CurrentCulture
+        try {
+            foreach ($culture in 'en-US','fr-FR') {
+                [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($culture)
+                foreach ($case in $loweredCases) {
+                    $flags = [Reflection.BindingFlags]'Public,NonPublic,Static'
+                    $arguments = [object[]]@($case.Arguments)
+                    $expected = $oracleAssembly.GetType('JavaNativeTypeManager',$true).GetMethod($case.Method,$flags).Invoke($null,$arguments)
+                    $actual = $loweredAssembly.GetType('JavaNativeTypeManager',$true).GetMethod($case.Method,$flags).Invoke($null,$arguments)
+                    if ($expected.GetType() -ne $actual.GetType() -or $expected -cne $actual) { throw "Lowered upstream JNI naming differs: $culture $($case.Method)" }
+                }
+            }
+        } finally { [Globalization.CultureInfo]::CurrentCulture = $priorCulture }
+        $dependencies = @($loweredAssembly.GetReferencedAssemblies().Name)
+        if (@($dependencies | Where-Object {$_ -ne 'System.Private.CoreLib'}).Count) { throw 'Lowered JNI naming helper has unexpected dependencies.' }
+        $loweredReceipt = @{Path=$loweredPath;SHA256=(Get-FileHash -LiteralPath $loweredPath).Hash;Methods=$admittedNames;CasesPerCulture=$loweredCases.Count;Differences=0;Dependencies=$dependencies}
+    }
+    $receipt = @{Commit=$pin;Platform=36;Classes=$classes.Count;ApiMembers=$bindings.Count;SourceFiles=$attempts.Count;SourceMethods=$sourceMethods.Count;Attempts=@($attempts | ForEach-Object {@{Source=$_.Source;Status=$_.Status;CompilerErrors=$_.CompilerErrors.Count;Diagnostics=$_.Diagnostics.Count}});HelperMethods=3;HelperCasesPerCulture=$cases.Count;ConditionalCasesPerCulture=2;Cultures=@('en-US','fr-FR');Differences=0;HelperAdmission=$admission;DeviceExecution='NotRun';Scope='Declaration inventory and independent managed naming logic; not executable audio/lifecycle/TTS bindings';PowerShell=$PSVersionTable.PSVersion.ToString();Runtime=[Environment]::Version.ToString()}
+    $receipt.Lowered = $loweredReceipt
+    Save-Text (Join-Path $directory 'receipt.json') ($receipt | ConvertTo-Json -Depth 10)
+    foreach ($family in $targets.Keys) { "$family`: $(@($classes | Where-Object Family -eq $family).Count) classes, $(@($bindings | Where-Object Family -eq $family).Count) declarations" }
+    "$($attempts.Count) C# files, $($sourceMethods.Count) methods/constructors inventoried"
+    $attempts | Group-Object Status | Select-Object Name,Count
+    "JNI helpers: 3 methods, $($cases.Count) parity calls per culture, 0 differences"
+    $admission | ForEach-Object { "$($_.Method): $($_.Status) $($_.Reason)" }
+    "Receipt: $(Join-Path $directory 'receipt.json')"
+    if (@($attempts | Where-Object Status -eq 'TranslatorFailure').Count) { throw 'Batch exposed translator failures; see source-inventory.json.' }
+    return
 }
 if ($Mode -eq 'CallMatrix') {
     if (-not $ApiCatalogPath) { $ApiCatalogPath = (Get-Content -Raw -LiteralPath (Join-Path $build 'api-catalog/current.json') | ConvertFrom-Json).ManifestPath }

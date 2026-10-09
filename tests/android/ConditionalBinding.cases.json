@@ -1,0 +1,4 @@
+[
+  {"Type":"ConditionalBinding","Method":"ApiLevel","Arguments":[]},
+  {"Type":"ConditionalBinding","Method":"TypeName","Arguments":[]}
+]
